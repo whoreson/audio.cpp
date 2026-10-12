@@ -1579,7 +1579,7 @@ HttpResponse ServerState::run_transcription(
     if (!request.audio_input.has_value()) {
         throw std::runtime_error("transcription timing requires audio_input");
     }
-    if (!detail) {
+if (!detail) {
         return json_response(
             "{\"text\":" + json_quote(result.text_output->text) +
             ",\"timing\":" + timing_json(timed_result.wall_ms, *request.audio_input) + "}");
