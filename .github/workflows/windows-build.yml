@@ -34,21 +34,18 @@ jobs:
         run: |
           .\scripts\build_windows.ps1 `
             -Preset windows-cpu-release `
-            -Target audiocpp_cli `
-            -Version ci
+            -Target audiocpp_cli
 
       - name: Build audiocpp_server
         shell: pwsh
         run: |
           .\scripts\build_windows.ps1 `
             -Preset windows-cpu-release `
-            -Target audiocpp_server `
-            -Version ci
+            -Target audiocpp_server
 
       - name: Build audiocpp_gguf
         shell: pwsh
         run: |
           .\scripts\build_windows.ps1 `
             -Preset windows-cpu-release `
-            -Target audiocpp_gguf `
-            -Version ci
+            -Target audiocpp_gguf

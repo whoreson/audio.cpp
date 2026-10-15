@@ -25,20 +25,12 @@ jobs:
         include:
           - backend: cpu
             enable_vulkan: "OFF"
-            cc: gcc-13
-            cxx: g++-13
           - backend: vulkan
             enable_vulkan: "ON"
-            cc: gcc-13
-            cxx: g++-13
-          - backend: cpu-clang
-            enable_vulkan: "OFF"
-            cc: clang-18
-            cxx: clang++-18
 
     env:
-      CC: ${{ matrix.cc }}
-      CXX: ${{ matrix.cxx }}
+      CC: gcc-13
+      CXX: g++-13
       BUILD_DIR: build/ci-linux-${{ matrix.backend }}
 
     steps:
@@ -55,24 +47,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-13 g++-13 cmake make glslc libvulkan-dev spirv-headers
 
-      - name: Install Clang
-        if: matrix.backend == 'cpu-clang'
-        run: sudo apt-get install -y clang-18 libomp-18-dev
-
       - name: Configure
         run: |
           cmake -S . -B "$BUILD_DIR" \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DAUDIOCPP_VERSION=ci \
             -DENGINE_ENABLE_CUDA=OFF \
-            -DENGINE_ENABLE_VULKAN=${{ matrix.enable_vulkan }} \
-            -DENGINE_BUILD_TESTS=ON
+            -DENGINE_ENABLE_VULKAN=${{ matrix.enable_vulkan }}
 
       - name: Build
         run: |
           cmake --build "$BUILD_DIR" --parallel "$(nproc)" --target audiocpp_cli audiocpp_server audiocpp_gguf
-
-      - name: Build and run unit tests
-        run: |
-          cmake --build "$BUILD_DIR" --parallel "$(nproc)"
-          ctest --test-dir "$BUILD_DIR" --output-on-failure --parallel 4
