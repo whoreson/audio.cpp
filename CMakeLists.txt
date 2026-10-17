@@ -171,6 +171,15 @@ if (EXISTS "${AUDIOCPP_GGML_SOURCE_DIR}/src/iqk/iqk_flash_attn.cpp")
 endif()
 add_subdirectory("${AUDIOCPP_GGML_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/ggml")
 add_subdirectory(external/sentencepiece EXCLUDE_FROM_ALL)
+if (AUDIOCPP_GGML_IK_LLAMA)
+    # Make the ik_llama compat shims (macros) visible in every C++ TU regardless of include order.
+    # Must come after the ggml/sentencepiece add_subdirectory() calls so it only affects our targets.
+    if (MSVC)
+        add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/FI${CMAKE_CURRENT_SOURCE_DIR}/include/engine/framework/core/ggml_compat.h>")
+    else()
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -include ${CMAKE_CURRENT_SOURCE_DIR}/include/engine/framework/core/ggml_compat.h")
+    endif()
+endif()
 
 add_compile_options(
     $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-Wall>

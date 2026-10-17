@@ -1,6 +1,6 @@
 #pragma once
 
-#ifdef AUDIOCPP_GGML_IK_LLAMA
+#if defined(AUDIOCPP_GGML_IK_LLAMA) && __has_include(<ggml.h>)
 
 #include <algorithm>
 #include <cmath>
@@ -438,124 +438,55 @@ static inline struct ggml_tensor * ggml_floor_compat(struct ggml_context * ctx, 
 }
 #define ggml_floor ggml_floor_compat
 
-// Disable IQK flash attention (use generic fallback) - IQK kernels crash on our shapes
-static inline void ggml_flash_attn_disable_iqk(struct ggml_tensor * a) {
-    if (a) a->op_params[4] = GGML_FLASH_ATTN_EXT_IQK_DISABLED;
-}
-
-// Manual flash attention replacement for ik_llama (its FA doesn't support F16 K/V)
-// Input: q [HD, T, H], k [HD, T, H], v [HD, T, H], mask [T, T] (optional)
-// Output: [HD, T, H] -> caller reshapes to [D, T]
-static inline struct ggml_tensor * ggml_manual_attn_ext_impl(
-    struct ggml_context * ctx,
-    struct ggml_tensor * q,  // [head_dim, n_batch, n_heads]
-    struct ggml_tensor * kk,  // [head_dim, n_kv, n_heads]
-    struct ggml_tensor * v,  // [head_dim, n_kv, n_heads]
-    struct ggml_tensor * mask,  // [n_kv, n_batch] or null
-    float scale, float max_bias, float softcap) {
-    // QK^T: [HD, T_q, H] @ [HD, T_k, H] -> need to compute per-head
-    // For simplicity, compute scores as: (q^T @ k) / sqrt(d) per head
-    // q: [HD, T_q, H], k: [HD, T_k, H]
-    // Transpose k: [T_k, HD, H], then mul_mat q^T @ k^T... 
-    // Actually, let's use the standard approach:
-    // scores[i,j,h] = sum_d q[d,i,h] * k[d,j,h] * scale
-    // This is a batched matmul. GGML can do it via:
-    // transpose k -> [T_k, HD, H], then q @ k^T per head
-    // But GGML doesn't have per-head batched matmul natively.
-    // 
-    // Simpler: use ggml_mul_mat with reshaping:
-    // q: [HD, T_q, H] -> reshape to [HD, T_q*H] 
-    // k: [HD, T_k, H] -> reshape to [HD, T_k*H]
-    // mul_mat(q, k) = [T_q*H, T_k*H] - NOT what we want
-    //
-    // Correct approach: 
-    // k_t = transpose(k) = [T_k, HD, H]
-    // scores = mul_mat(q_t, k) where q_t = [T_q, HD, H]
-    // = [T_q, T_k, H] - still 3D
-    // Actually GGML mul_mat is 2D: [m, k] @ [k, n] = [m, n]
-    // So reshape q to [HD, T_q*H], k to [HD, T_k*H]
-    // mul_mat gives [T_q*H, T_k*H] which is wrong (cross-head mixing)
-    //
-    // The correct approach for per-head attention:
-    // Use ggml_mul_mat per head via a loop or ggml_map_custom3
-    // For now, use ggml_flash_attn_ext with a fallback:
-    // If the types are F16, the only working approach is to use the 
-    // stock ggml's flash attention. Since we can't mix forks,
-    // implement a simple dense attention using mul_mat + softmax.
-    
-    (void)max_bias; (void)softcap;
-    
-    // k^T: [T_k, HD, H] -> [T_k, HD*H]
-    // Actually, let's just do the standard approach:
-    // scores = Q @ K^T / sqrt(d) where Q=[T,HD], K=[T_k,HD] per head
-    // We need to handle heads. Reshape:
-    // q: [HD, T_q, H] -> view as [T_q, HD*H] (transpose + reshape)
-    // k: [HD, T_k, H] -> view as [T_k, HD*H]
-    // This gives scores = q @ k^T = [T_q, T_k] but with cross-head mixing
-    
-    // For correct per-head attention we need to separate heads first.
-    // The simplest working approach: use the einsum-like decomposition
-    // that GGML supports via mul_mat with proper reshaping.
-    
-    // q: [HD, T_q, H], k: [HD, T_k, H]
-    // Step 1: k_t = ggml_cont(ggml_transpose(ctx, kk)) = [T_k, HD, H]
-    // Step 2: scores = ggml_mul_mat(q, k_t) = [T_k, T_q, H] NO - mul_mat is 2D
-    // 
-    // Let me use the correct GGML approach:
-    // scores[i,j] = sum_d q[d,i,h] * k[d,j,h] for each head h
-    // This is a batched matmul with batch=H.
-    // GGML mul_mat with 3D tensors: if q=[HD,T_q,H] and k_t=[T_k,HD,H],
-    // then mul_mat(q, k_t) = [T_k, T_q, H] - YES! GGML mul_mat handles 3D
-    // as batched 2D matmul over the remaining dims.
-    // 
-    // Wait, GGML mul_mat is defined as: dst = src0^T @ src1 (for 2D)
-    // For 3D: dst[b] = src0[b]^T @ src1[b]
-    // So q^T @ k_t = [T_q, HD, H] @ [T_k, HD, H]
-    // q^T = [HD, T_q, H], k_t = [T_k, HD, H]
-    // mul_mat(q, k_t) = q^T @ k_t = [T_q, HD, H] @ [T_k, HD, H]
-    // = [T_q, T_k, H] - YES!
-    
-    auto * k_t = ggml_cont(ctx, ggml_transpose(ctx, kk));  // [T_k, HD, H]
-    auto * scores = ggml_mul_mat(ctx, q, k_t);  // [T_q, T_k, H]
-    // Apply scale
-    scores = ggml_scale(ctx, scores, scale);
-    // Apply mask
-    if (mask) {
-        // mask: [T_k, T_q] or [T_k, mask_pad]
-        // scores: [T_q, T_k, H]
-        // Need to broadcast mask over heads: repeat mask to [T_q, T_k, H]
-        auto * mask_rep = ggml_repeat(ctx, mask, ggml_reshape_3d(ctx, scores, scores->ne[0], scores->ne[1], scores->ne[2]));
-        scores = ggml_add(ctx, scores, mask_rep);
+// 16. ggml_flash_attn_ext: normalise arguments to ik_llama's FA contract.
+//     Stock ggml is lenient; ik_llama's CPU FA is not:
+//       * q must be F32;
+//       * K/V must be F16, or the same quantised type / both BF16 (F32 K+V => "Fatal error");
+//       * mask must be F16 with mask->ne[1] >= GGML_PAD(n_q, GGML_KQ_MASK_PAD) (assert), and is
+//         shared across heads (ne[2] == ne[3] == 1).
+//     Rows added by padding are never read for real queries.
+static inline struct ggml_tensor * ggml_flash_attn_ext_compat(
+        struct ggml_context * ctx, struct ggml_tensor * q, struct ggml_tensor * k, struct ggml_tensor * v,
+        struct ggml_tensor * mask, float scale, float max_bias, float logit_softcap) {
+    if (q->type != GGML_TYPE_F32) {
+        q = ggml_cast(ctx, q, GGML_TYPE_F32);
     }
-    // Softmax over T_k (dim 1)
-    scores = ggml_soft_max(ctx, scores);
-    // scores: [T_q, T_k, H], v: [HD, T_k, H]
-    // output = v @ scores = [HD, T_k, H] @ [T_q, T_k, H]
-    // v^T @ scores... no, we want sum_t scores[n,t,h] * v[d,t,h]
-    // = v @ scores^T... 
-    // scores^T = [T_k, T_q, H]
-    // v @ scores^T = [HD, T_k, H] @ [T_k, T_q, H] = [HD, T_q, H]
-    auto * scores_t = ggml_cont(ctx, ggml_transpose(ctx, scores));  // [T_k, T_q, H]
-    auto * out = ggml_mul_mat(ctx, v, scores_t);  // [HD, T_q, H]
-    return out;
+    const bool kv_native = k->type == v->type &&
+        (k->type == GGML_TYPE_F16 || k->type == GGML_TYPE_BF16 || k->type == GGML_TYPE_Q8_0 || k->type == GGML_TYPE_Q6_0);
+    if (!kv_native) {
+        if (k->type != GGML_TYPE_F16) k = ggml_cast(ctx, k, GGML_TYPE_F16);
+        if (v->type != GGML_TYPE_F16) v = ggml_cast(ctx, v, GGML_TYPE_F16);
+    }
+    if (mask) {
+        GGML_ASSERT(mask->ne[2] == 1 && mask->ne[3] == 1 && "ik_llama FA cannot take per-head masks");
+        const int64_t need = GGML_PAD(q->ne[1], GGML_KQ_MASK_PAD);
+        if (mask->ne[1] < need) {
+            struct ggml_tensor * m = mask;
+            if (m->type != GGML_TYPE_F32) m = ggml_cast(ctx, m, GGML_TYPE_F32);
+            else if (!ggml_is_contiguous(m)) m = ggml_cont(ctx, m);
+            m = ggml_pad(ctx, m, 0, (int) (need - mask->ne[1]), 0, 0);
+            mask = ggml_cast(ctx, m, GGML_TYPE_F16);
+        } else if (mask->type != GGML_TYPE_F16) {
+            mask = ggml_cast(ctx, mask, GGML_TYPE_F16);
+        }
+    }
+    return ggml_flash_attn_ext(ctx, q, k, v, mask, scale, max_bias, logit_softcap);
 }
+#define ggml_flash_attn_ext ggml_flash_attn_ext_compat
 
-// ik_llama's typed add kernels (add_f32_f16, add_f16_f32) require exact
-// shape match but do not support broadcasting. Stock ggml handles broadcast
-// in the generic F32 kernel. We intercept ggml_add to pre-repeated the
-// smaller operand when types are mixed (F32+F16) and shapes differ.
-#define ggml_add(ctx, a, b)     ({         struct ggml_tensor * _a = (a); struct ggml_tensor * _b = (b);         if (((_a)->type == GGML_TYPE_F32 && (_b)->type == GGML_TYPE_F16) ||             ((_a)->type == GGML_TYPE_F16 && (_b)->type == GGML_TYPE_F32)) {             if (!ggml_are_same_shape(_a, _b)) _b = ggml_repeat(ctx, _b, _a);         }         ggml_add_impl((ctx), _a, _b, false);     })
+// NOTE: the former ggml_manual_attn_ext_impl / ggml_flash_attn_disable_iqk helpers were removed.
+// The manual version was numerically wrong (see docs in the commit message) and the "IQK crashes"
+// it worked around were FA contract violations: (1) the KQ mask must be padded to
+// GGML_KQ_MASK_PAD rows, (2) CPU FA K/V must be F16/Q8_0/Q6_0/... (F32 K+V is a fatal error).
+// Call sites satisfy both (see xtts_v2/gpt.cpp) and use real ggml_flash_attn_ext.
 
-// Need the internal ggml_add_impl for the macro above
-// (it's not extern, so we call ggml_add from the compat function instead)
-#undef ggml_add
+// ik_llama's typed add kernels (add_f32_f16, add_f16_f32) require exact shape match and do not
+// broadcast. Convert the F16 operand to F32 so the generic broadcasting F32 path is taken.
 static inline struct ggml_tensor * ggml_add_compat(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
         struct ggml_tensor  * b)
 {
-    // ik_llama's typed add kernels require exact shape match for mixed types.
-    // Convert F16 operand to F32 so the F32+F32 broadcast path is taken.
     if (a->type == GGML_TYPE_F32 && b->type == GGML_TYPE_F16) {
         b = ggml_cast(ctx, b, GGML_TYPE_F32);
     } else if (a->type == GGML_TYPE_F16 && b->type == GGML_TYPE_F32) {

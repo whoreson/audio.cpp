@@ -686,6 +686,16 @@ struct GptGraph {
     ~GptGraph() { release(); }
 };
 
+// FA kernels (ik_llama; also fine for stock ggml) read the mask in padded blocks of
+// GGML_KQ_MASK_PAD rows. A [n_kv, n_tok] mask with n_tok < pad trips an assert in ik.
+static inline int64_t xtts_mask_rows(int64_t n_tok) {
+#ifdef AUDIOCPP_GGML_IK_LLAMA
+    return GGML_PAD(n_tok, GGML_KQ_MASK_PAD);
+#else
+    return n_tok;
+#endif
+}
+
 static bool gpt_build_graph(GptGraph& g, ggml_backend_t be, const GM& m, const XttSv2HyperParams& hp,
                             GptKV& kv, int n_tok, int n_kv) {
     g.release();
@@ -701,7 +711,7 @@ static bool gpt_build_graph(GptGraph& g, ggml_backend_t be, const GM& m, const X
 
     g.emb = ggml_new_tensor_2d(c, GGML_TYPE_F32, D, n_tok);   ggml_set_name(g.emb, "gpt_emb");  ggml_set_input(g.emb);
     g.idx = ggml_new_tensor_1d(c, GGML_TYPE_I64, n_tok);      ggml_set_name(g.idx, "kv_idx");   ggml_set_input(g.idx);
-    g.mask = ggml_new_tensor_2d(c, GGML_TYPE_F16, n_kv, n_tok); ggml_set_name(g.mask, "kq_mask"); ggml_set_input(g.mask);
+    g.mask = ggml_new_tensor_2d(c, GGML_TYPE_F16, n_kv, xtts_mask_rows(n_tok)); ggml_set_name(g.mask, "kq_mask"); ggml_set_input(g.mask);
 
     const size_t fs = sizeof(float);
     ggml_tensor* x = g.emb;
@@ -720,19 +730,7 @@ static bool gpt_build_graph(GptGraph& g, ggml_backend_t be, const GM& m, const X
         ggml_build_forward_expand(g.gf, ggml_set_rows(c, kv.v[l], vs, g.idx));
         ggml_tensor* kc = ggml_view_3d(c, kv.k[l], HD, n_kv, H, kv.k[l]->nb[1], kv.k[l]->nb[2], 0);
         ggml_tensor* vc = ggml_view_3d(c, kv.v[l], HD, n_kv, H, kv.v[l]->nb[1], kv.v[l]->nb[2], 0);
-        ggml_tensor* a = nullptr;
-#ifdef AUDIOCPP_GGML_IK_LLAMA
-        // ik_llama: plain matmul attention (IQK FA doesn't support F16 KV cache)
-        { ggml_tensor* sc = ggml_mul_mat(c, q, kc);
-          sc = ggml_scale(c, sc, 1.0f / sqrtf((float)HD));
-          if (g.mask) sc = ggml_add(c, sc, ggml_transpose(c, g.mask));
-          sc = ggml_soft_max(c, sc);
-          ggml_tensor* vt = ggml_cont(c, ggml_transpose(c, vc));
-          ggml_tensor* st = ggml_cont(c, ggml_transpose(c, sc));
-          a = ggml_mul_mat(c, vt, st); }
-#else
-        { a = ggml_flash_attn_ext(c, q, kc, vc, g.mask, 1.0f / sqrtf((float)HD), 0.0f, 0.0f); }
-#endif
+        ggml_tensor* a = ggml_flash_attn_ext(c, q, kc, vc, g.mask, 1.0f / sqrtf((float)HD), 0.0f, 0.0f);
         a = ggml_reshape_2d(c, a, D, n_tok);                               // [h*HD+d, t] already contiguous
         a = ggml_mul_mat(c, b.pwo, a);
         if (b.pwb) a = ggml_add(c, a, b.pwb);
@@ -764,11 +762,14 @@ static bool gpt_build_graph(GptGraph& g, ggml_backend_t be, const GM& m, const X
 
 // Causal mask for query rows at absolute positions pos0..pos0+n_tok-1 over n_kv keys.
 static void gpt_fill_mask(GptGraph& g, int pos0) {
-    std::vector<ggml_fp16_t> mk((size_t)g.n_kv * g.n_tok);
+    // The mask may carry extra padding rows (ik_llama FA needs ne[1] >= GGML_PAD(n_tok, GGML_KQ_MASK_PAD));
+    // they are never read for real queries, keep them finite.
+    const int rows = (int) g.mask->ne[1];
+    std::vector<ggml_fp16_t> mk((size_t)g.n_kv * rows);
     const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f), ninf = ggml_fp32_to_fp16(-INFINITY);
-    for (int t = 0; t < g.n_tok; t++)
+    for (int t = 0; t < rows; t++)
         for (int j = 0; j < g.n_kv; j++)
-            mk[(size_t)t * g.n_kv + j] = (j <= pos0 + t) ? zero : ninf;
+            mk[(size_t)t * g.n_kv + j] = (t >= g.n_tok || j <= pos0 + t) ? zero : ninf;
     ggml_backend_tensor_set(g.mask, mk.data(), 0, mk.size() * sizeof(ggml_fp16_t));
 }
 
@@ -959,13 +960,13 @@ static std::vector<float> gpt_extract(ggml_context* ctx, ggml_backend_t be, cons
         fprintf(stderr, "xtts_dbg: dumped %zu input embs (T=%d)\n", embs.size(), T);
     }
     // Element (key j, query i) = 0 if j <= i else -INF (decoder-only causal attention).
-    ggml_tensor* causal_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, T, T);
+    ggml_tensor* causal_mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, T, xtts_mask_rows(T));
     ggml_set_name(causal_mask, "attn_causal_mask");
     ggml_set_input(causal_mask);
-    std::vector<ggml_fp16_t> mdata((size_t)T * T);
-    for (int i = 0; i < T; i++)
+    std::vector<ggml_fp16_t> mdata((size_t)T * causal_mask->ne[1]);
+    for (int i = 0; i < (int) causal_mask->ne[1]; i++)
         for (int j = 0; j < T; j++)
-            mdata[(size_t)i * T + j] = ggml_fp32_to_fp16(j <= i ? 0.0f : -65504.0f);
+            mdata[(size_t)i * T + j] = ggml_fp32_to_fp16((i >= T || j <= i) ? 0.0f : -65504.0f);
     { ggml_backend_buffer_t mbuf = ggml_backend_alloc_buffer(be, ggml_nbytes(causal_mask));
       causal_mask->buffer = mbuf; causal_mask->data = ggml_backend_buffer_get_base(mbuf);
       memcpy(causal_mask->data, mdata.data(), ggml_nbytes(causal_mask));
@@ -984,18 +985,12 @@ static std::vector<float> gpt_extract(ggml_context* ctx, ggml_backend_t be, cons
         auto* q = ggml_view_3d(ctx, qkv, hp.head_dim, T, hp.n_heads, qkv->nb[2], qkv->nb[1], 0);
         auto* k = ggml_view_3d(ctx, qkv, hp.head_dim, T, hp.n_heads, qkv->nb[2], qkv->nb[1], (size_t)hp.n_heads * hp.head_dim * ggml_type_size(qkv->type));
         auto* v = ggml_view_3d(ctx, qkv, hp.head_dim, T, hp.n_heads, qkv->nb[2], qkv->nb[1], 2 * (size_t)hp.n_heads * hp.head_dim * ggml_type_size(qkv->type));
-        ggml_tensor* a = nullptr;
 #ifdef AUDIOCPP_GGML_IK_LLAMA
-        { auto* sc = ggml_mul_mat(ctx, q, k);
-          sc = ggml_scale(ctx, sc, 1.0f / sqrtf(hp.head_dim));
-          sc = ggml_add(ctx, sc, ggml_transpose(ctx, causal_mask));
-          sc = ggml_soft_max(ctx, sc);
-          auto* vt = ggml_cont(ctx, ggml_transpose(ctx, v));
-          auto* st = ggml_cont(ctx, ggml_transpose(ctx, sc));
-          a = ggml_mul_mat(ctx, vt, st); }
-#else
-        { a = ggml_flash_attn_ext(ctx, q, k, v, causal_mask, 1.0f / sqrtf(hp.head_dim), 0, 0); }
+        // ik_llama's CPU FA only accepts F16/Q8_0/Q6_0/... K/V (F32 K+V is a fatal error).
+        k = ggml_cast(ctx, k, GGML_TYPE_F16);
+        v = ggml_cast(ctx, v, GGML_TYPE_F16);
 #endif
+        ggml_tensor* a = ggml_flash_attn_ext(ctx, q, k, v, causal_mask, 1.0f / sqrtf(hp.head_dim), 0, 0);
         snprintf(nm, sizeof(nm), "at%d", l); ggml_set_name(a, nm);
         // flash_attn_ext result is [n_embd_v, n_head, n_batch] ("permuted" layout) whose
         // contiguous flat layout is ALREADY [t][h*hd + d] = the merged [D, T] we need.
