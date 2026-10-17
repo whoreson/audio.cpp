@@ -1,4 +1,5 @@
 #include "engine/framework/modules/attention/grouped_query_attention.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/modules/structural_modules.h"
 

@@ -1,4 +1,5 @@
 #include "engine/models/chatterbox/s3gen_inference.h"
+#include "engine/framework/core/ggml_compat.h"
 #include "components/component_weights.h"
 #include "components/s3gen_weights.h"
 #include "engine/framework/core/backend.h"

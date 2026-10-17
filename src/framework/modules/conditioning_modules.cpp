@@ -1,4 +1,5 @@
 #include "engine/framework/modules/conditioning_modules.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "tensor_layout_utils.h"
 #include "engine/framework/modules/activation_modules.h"

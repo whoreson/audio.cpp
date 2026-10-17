@@ -1,4 +1,5 @@
 #include "engine/community_models/parakeet_tdt/decoder.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/core/backend.h"
 #include "engine/framework/debug/profiler.h"

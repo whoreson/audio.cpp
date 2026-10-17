@@ -1,4 +1,5 @@
 #pragma once
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/models/pocket_tts/mimi_decoder.h"
 

@@ -1,4 +1,5 @@
 #include "engine/framework/runtime/graph_optimizer.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include <algorithm>
 #include <cctype>

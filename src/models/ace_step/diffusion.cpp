@@ -1,4 +1,5 @@
 #include "engine/models/ace_step/diffusion.h"
+#include "engine/framework/core/ggml_compat.h"
 #include "engine/framework/core/backend.h"
 #include "engine/framework/io/binary.h"
 #include "engine/framework/debug/profiler.h"

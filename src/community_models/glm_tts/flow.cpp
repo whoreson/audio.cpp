@@ -1,4 +1,5 @@
 #include "engine/community_models/glm_tts/flow.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/core/backend_weight_store.h"
 #include "engine/framework/core/execution_context.h"

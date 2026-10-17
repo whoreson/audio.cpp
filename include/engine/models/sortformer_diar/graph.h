@@ -1,4 +1,5 @@
 #pragma once
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/core/execution_context.h"
 #include "engine/framework/core/module.h"

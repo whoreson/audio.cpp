@@ -1,4 +1,5 @@
 #include "engine/models/ace_step/vae_encoder.h"
+#include "engine/framework/core/ggml_compat.h"
 #include "vae_common.h"
 #include "engine/framework/core/backend.h"
 #include "engine/framework/debug/profiler.h"

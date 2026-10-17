@@ -1,4 +1,5 @@
 #pragma once
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/models/pocket_tts/types.h"
 #include "engine/models/pocket_tts/flow_lm.h"

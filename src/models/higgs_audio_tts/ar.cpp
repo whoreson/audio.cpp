@@ -1,4 +1,5 @@
 #include "engine/models/higgs_audio_tts/ar.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/core/backend.h"
 #include "engine/framework/core/backend_weight_store.h"

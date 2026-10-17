@@ -1,4 +1,5 @@
 #include "engine/models/moss/shared/audio_tokenizer_decoder.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/core/backend.h"
 #include "engine/framework/core/module.h"

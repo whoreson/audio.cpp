@@ -1,4 +1,5 @@
 #include "engine/community_models/vietneu_tts/tokenizer_speech_decoder.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/assets/tensor_source.h"
 #include "engine/framework/core/backend.h"

@@ -1,4 +1,5 @@
 #include "engine/models/heartmula/mula.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/core/backend_weight_store.h"
 #include "engine/framework/modules/activation_modules.h"

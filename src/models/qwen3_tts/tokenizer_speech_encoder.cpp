@@ -1,4 +1,5 @@
 #include "engine/models/qwen3_tts/tokenizer_speech_encoder.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/assets/tensor_source.h"
 #include "engine/framework/audio/conversion.h"

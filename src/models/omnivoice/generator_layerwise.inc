@@ -1,4 +1,5 @@
 // This file is included by generator.cpp inside the OmniVoice anonymous namespace.
+#include "engine/framework/core/ggml_compat.h"
 
 class GraphBufferSet {
 public:
@@ -80,19 +81,17 @@ public:
 
             auto tallocr = ggml_tallocr_new(buffer);
             for (ggml_tensor * tensor = plans[i].first; tensor != plans[i].last; tensor = ggml_get_next_tensor(ctx, tensor)) {
-                enum ggml_status status = GGML_STATUS_SUCCESS;
                 if (tensor->data == nullptr) {
                     if (tensor->view_src == nullptr) {
-                        status = ggml_tallocr_alloc(&tallocr, tensor);
+                        ggml_tallocr_alloc(&tallocr, tensor);
                     } else if (tensor->buffer == nullptr) {
-                        status = ggml_backend_view_init(tensor);
+                        ggml_backend_view_init(tensor);
                     }
                 } else if (tensor->view_src != nullptr && tensor->buffer == nullptr) {
-                    status = ggml_backend_view_init(tensor);
+                    ggml_backend_view_init(tensor);
                 }
-                if (status != GGML_STATUS_SUCCESS) {
-                    throw std::runtime_error(std::string("failed to allocate ") + error_prefix + " graph tensor");
-                }
+                // ik_llama's ggml_tallocr_alloc / ggml_backend_view_init return void and
+                // abort internally on failure, so there is no status to check here.
             }
         }
     }

@@ -5,7 +5,9 @@
 #include "engine/framework/io/json.h"
 #include "engine/framework/io/safetensors.h"
 
+#ifndef AUDIOCPP_GGML_IK_LLAMA
 #include <gguf.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -194,7 +196,11 @@ std::vector<std::byte> quantize_f32_rows(
         0,
         rows,
         elements_per_row,
-        nullptr);
+        static_cast<const float*>(nullptr)
+#ifdef AUDIOCPP_GGML_IK_LLAMA
+        , static_cast<const quantize_user_data*>(nullptr)
+#endif
+        );
     if (written != bytes.size()) {
         throw std::runtime_error("quantized tensor byte size mismatch: " + std::string(name));
     }
@@ -242,7 +248,11 @@ std::vector<float> decode_tensor_data_f32(std::string_view name, const TensorDat
             tensor.shape.num_elements());
         return values;
     }
+    #ifdef AUDIOCPP_GGML_IK_LLAMA
+    const ggml_type_traits_t * traits = ggml_get_type_traits(tensor.type);
+#else
     const ggml_type_traits * traits = ggml_get_type_traits(tensor.type);
+#endif
     if (traits == nullptr || traits->to_float == nullptr) {
         throw std::runtime_error("tensor type is not readable as F32 data: " + std::string(name));
     }
@@ -718,11 +728,13 @@ public:
                 info.type = gguf_get_tensor_type(gguf, i);
                 info.dtype = dtype_for_ggml_type(info.type);
                 info.data_offset = gguf_get_tensor_offset(gguf, i);
-                info.byte_size = gguf_get_tensor_size(gguf, i);
                 const ggml_tensor * tensor = ggml_get_tensor(tensor_context, info.physical_name.c_str());
                 if (tensor == nullptr) {
                     throw std::runtime_error("GGUF tensor metadata is missing: " + info.physical_name);
                 }
+                // ik_llama's gguf API has no gguf_get_tensor_size(); derive the exact
+                // payload size from the ggml tensor description (no alignment padding).
+                info.byte_size = ggml_nbytes(tensor);
                 if (has_exact_shapes) {
                     const auto * ranks = static_cast<const int32_t *>(gguf_get_arr_data(gguf, ranks_key));
                     const auto * shapes = static_cast<const int64_t *>(gguf_get_arr_data(gguf, shapes_key));
@@ -2064,7 +2076,8 @@ void convert_tensor_sources_to_gguf(const std::vector<TensorSourceInput> & input
         auto temporary_path = output_path;
         temporary_path += ".tmp";
         std::filesystem::remove(temporary_path);
-        if (!gguf_write_to_file(gguf, temporary_path.string().c_str(), true)) {
+        gguf_write_to_file(gguf, temporary_path.string().c_str(), true);
+        if (!std::filesystem::exists(temporary_path)) {
             throw std::runtime_error("failed to write GGUF metadata: " + temporary_path.string());
         }
 
@@ -2093,7 +2106,11 @@ void convert_tensor_sources_to_gguf(const std::vector<TensorSourceInput> & input
                     raw.metadata = item.metadata;
                     raw.bytes = tensor.bytes;
                 }
-                const size_t expected_size = gguf_get_tensor_size(gguf, static_cast<int64_t>(i));
+                const ggml_tensor * expected_tensor = ggml_get_tensor(tensor_context, item.physical_name.c_str());
+                if (expected_tensor == nullptr) {
+                    throw std::runtime_error("GGUF tensor metadata is missing: " + item.physical_name);
+                }
+                const size_t expected_size = ggml_nbytes(expected_tensor);
                 if (raw.bytes.size() != expected_size) {
                     throw std::runtime_error("GGUF converted tensor byte size mismatch: " + item.metadata.name);
                 }

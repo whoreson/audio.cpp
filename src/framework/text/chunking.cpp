@@ -55,12 +55,12 @@ bool is_horizontal_ascii_space(std::string_view token) noexcept {
 
 bool is_sentence_break(std::string_view token) {
     return token == "." || token == "!" || token == "?" ||
-           token == u8"。" || token == u8"！" || token == u8"？";
+           token == "。" || token == "！" || token == "？";
 }
 
 bool is_clause_break(std::string_view token) {
     return token == "," || token == ";" || token == ":" ||
-           token == u8"，" || token == u8"、" || token == u8"；" || token == u8"：";
+           token == "，" || token == "、" || token == "；" || token == "：";
 }
 
 bool is_tag_open(std::string_view token) {

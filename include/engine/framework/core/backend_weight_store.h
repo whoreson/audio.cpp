@@ -1,4 +1,5 @@
 #pragma once
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/assets/tensor_source.h"
 #include "engine/framework/core/backend.h"
@@ -385,7 +386,11 @@ private:
             0,
             rows,
             elements_per_row,
-            nullptr);
+            static_cast<const float*>(nullptr)
+#ifdef AUDIOCPP_GGML_IK_LLAMA
+            , static_cast<const quantize_user_data*>(nullptr)
+#endif
+            );
         if (written != bytes.size()) {
             throw std::runtime_error(name_ + " derived quantized tensor byte size mismatch");
         }

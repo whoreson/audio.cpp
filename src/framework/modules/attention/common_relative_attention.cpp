@@ -1,4 +1,5 @@
 #include "attention_internal.h"
+#include "engine/framework/core/ggml_compat.h"
 
 namespace engine::modules::attention::internal {
 
@@ -11,11 +12,18 @@ bool use_specialized_flash_attention(
     // Keep the production path on the reference implementation until callers
     // explicitly opt in. The flash-attention path is only valid for offline
     // full-context attention with a precomputed projected positional embedding.
+#ifdef AUDIOCPP_GGML_IK_LLAMA
+    // ik_llama's FA cannot take a per-head bias/mask (mask->ne[2] must be 1) and has no
+    // ggml_flash_attn_ext_with_bias_mask; use the reference matmul + soft_max_ext path.
+    (void) config; (void) attention_mask; (void) projected_pos_emb;
+    return false;
+#else
     return config.use_flash_attention &&
            config.left_context < 0 &&
            config.right_context < 0 &&
            attention_mask.has_value() &&
            projected_pos_emb.has_value();
+#endif
 }
 
 }  // namespace

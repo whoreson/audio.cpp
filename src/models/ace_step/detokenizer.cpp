@@ -1,4 +1,5 @@
 #include "engine/models/ace_step/detokenizer.h"
+#include "engine/framework/core/ggml_compat.h"
 #include "engine/framework/core/backend.h"
 #include "engine/framework/modules/transformers/qwen_decoder.h"
 #include "engine/framework/modules/activation_modules.h"

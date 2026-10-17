@@ -1,4 +1,5 @@
 #include "engine/community_models/parakeet_tdt/encoder.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/core/backend.h"
 #include "engine/framework/debug/profiler.h"
@@ -258,6 +259,9 @@ engine::core::TensorValue build_encoder_layer(
     auto matrix_bd = relative_shift_view(ctx, matrix_bd_raw, seq_len);
 
     engine::core::TensorValue context;
+#ifdef AUDIOCPP_GGML_IK_LLAMA
+    use_flash_attention = false;  // see common_relative_attention.cpp: ik FA lacks per-head bias masks
+#endif
     if (use_flash_attention) {
         // matrix_bd is the relative-position score term (Transformer-XL "BD" term);
         // it is exactly the "dense additive attention bias" ggml_flash_attn_ext_with_bias_mask

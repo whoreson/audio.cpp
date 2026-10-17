@@ -1,4 +1,5 @@
 #include "engine/community_models/kroko_asr/zipformer.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/core/backend.h"
 #include "engine/framework/core/backend_weight_store.h"

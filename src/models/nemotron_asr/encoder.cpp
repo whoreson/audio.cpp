@@ -1,4 +1,5 @@
 #include "engine/models/nemotron_asr/encoder.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/core/backend.h"
 #include "engine/framework/debug/profiler.h"

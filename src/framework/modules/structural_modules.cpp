@@ -1,4 +1,5 @@
 #include "engine/framework/modules/structural_modules.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include <algorithm>
 #include <stdexcept>

@@ -1,4 +1,5 @@
 #include "engine/models/supertonic/runtime.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/audio/output.h"
 #include "engine/framework/core/backend.h"

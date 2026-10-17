@@ -1,4 +1,5 @@
 #include "engine/models/chatterbox/s3gen_flow.h"
+#include "engine/framework/core/ggml_compat.h"
 #include "components/s3gen_weights.h"
 
 #include "engine/framework/assets/tensor_source.h"

@@ -1,4 +1,5 @@
 #include "engine/framework/modules/attention/scaled_dot_product_attention.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "attention_internal.h"
 

@@ -1,4 +1,5 @@
 #include "engine/community_models/xtts_v2/assets.h"
+#include "engine/framework/core/ggml_compat.h"
 #include "engine/community_models/xtts_v2/tokenizer_text.h"
 #include "engine/framework/io/filesystem.h"
 
@@ -8,7 +9,9 @@
 #include <filesystem>
 #include <string>
 
+#ifndef AUDIOCPP_GGML_IK_LLAMA
 #include "gguf.h"
+#endif
 
 namespace engine::models::xtts_v2 {
 namespace {

@@ -1,4 +1,5 @@
 #include "engine/framework/modules/attention/longformer_attention.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "attention_internal.h"
 #include "../tensor_layout_utils.h"

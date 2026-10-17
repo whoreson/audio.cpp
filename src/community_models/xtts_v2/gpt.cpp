@@ -1,12 +1,17 @@
 // xtts_v2 GPT engine -- GPT-2 AR + ConditioningEncoder + Perceiver resampler
 #include "engine/community_models/xtts_v2/gpt.h"
+#include "engine/framework/core/ggml_compat.h"
 #include "engine/community_models/xtts_v2/assets.h"
 #include "engine/community_models/xtts_v2/tokenizer_text.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
+#ifndef AUDIOCPP_GGML_IK_LLAMA
 #include "ggml-cpu.h"
+#endif
 #include "ggml.h"
+#ifndef AUDIOCPP_GGML_IK_LLAMA
 #include "gguf.h"
+#endif
 #include <algorithm>
 #include <chrono>
 #include <omp.h>
@@ -715,7 +720,19 @@ static bool gpt_build_graph(GptGraph& g, ggml_backend_t be, const GM& m, const X
         ggml_build_forward_expand(g.gf, ggml_set_rows(c, kv.v[l], vs, g.idx));
         ggml_tensor* kc = ggml_view_3d(c, kv.k[l], HD, n_kv, H, kv.k[l]->nb[1], kv.k[l]->nb[2], 0);
         ggml_tensor* vc = ggml_view_3d(c, kv.v[l], HD, n_kv, H, kv.v[l]->nb[1], kv.v[l]->nb[2], 0);
-        ggml_tensor* a = ggml_flash_attn_ext(c, q, kc, vc, g.mask, 1.0f / sqrtf((float)HD), 0.0f, 0.0f);
+        ggml_tensor* a = nullptr;
+#ifdef AUDIOCPP_GGML_IK_LLAMA
+        // ik_llama: plain matmul attention (IQK FA doesn't support F16 KV cache)
+        { ggml_tensor* sc = ggml_mul_mat(c, q, kc);
+          sc = ggml_scale(c, sc, 1.0f / sqrtf((float)HD));
+          if (g.mask) sc = ggml_add(c, sc, ggml_transpose(c, g.mask));
+          sc = ggml_soft_max(c, sc);
+          ggml_tensor* vt = ggml_cont(c, ggml_transpose(c, vc));
+          ggml_tensor* st = ggml_cont(c, ggml_transpose(c, sc));
+          a = ggml_mul_mat(c, vt, st); }
+#else
+        { a = ggml_flash_attn_ext(c, q, kc, vc, g.mask, 1.0f / sqrtf((float)HD), 0.0f, 0.0f); }
+#endif
         a = ggml_reshape_2d(c, a, D, n_tok);                               // [h*HD+d, t] already contiguous
         a = ggml_mul_mat(c, b.pwo, a);
         if (b.pwb) a = ggml_add(c, a, b.pwb);
@@ -967,7 +984,18 @@ static std::vector<float> gpt_extract(ggml_context* ctx, ggml_backend_t be, cons
         auto* q = ggml_view_3d(ctx, qkv, hp.head_dim, T, hp.n_heads, qkv->nb[2], qkv->nb[1], 0);
         auto* k = ggml_view_3d(ctx, qkv, hp.head_dim, T, hp.n_heads, qkv->nb[2], qkv->nb[1], (size_t)hp.n_heads * hp.head_dim * ggml_type_size(qkv->type));
         auto* v = ggml_view_3d(ctx, qkv, hp.head_dim, T, hp.n_heads, qkv->nb[2], qkv->nb[1], 2 * (size_t)hp.n_heads * hp.head_dim * ggml_type_size(qkv->type));
-        auto* a = ggml_flash_attn_ext(ctx, q, k, v, causal_mask, 1.0f / sqrtf(hp.head_dim), 0, 0);
+        ggml_tensor* a = nullptr;
+#ifdef AUDIOCPP_GGML_IK_LLAMA
+        { auto* sc = ggml_mul_mat(ctx, q, k);
+          sc = ggml_scale(ctx, sc, 1.0f / sqrtf(hp.head_dim));
+          sc = ggml_add(ctx, sc, ggml_transpose(ctx, causal_mask));
+          sc = ggml_soft_max(ctx, sc);
+          auto* vt = ggml_cont(ctx, ggml_transpose(ctx, v));
+          auto* st = ggml_cont(ctx, ggml_transpose(ctx, sc));
+          a = ggml_mul_mat(ctx, vt, st); }
+#else
+        { a = ggml_flash_attn_ext(ctx, q, k, v, causal_mask, 1.0f / sqrtf(hp.head_dim), 0, 0); }
+#endif
         snprintf(nm, sizeof(nm), "at%d", l); ggml_set_name(a, nm);
         // flash_attn_ext result is [n_embd_v, n_head, n_batch] ("permuted" layout) whose
         // contiguous flat layout is ALREADY [t][h*hd + d] = the merged [D, T] we need.

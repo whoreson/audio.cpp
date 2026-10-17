@@ -1,4 +1,5 @@
 #include "engine/models/voxcpm2/generator.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "minicpm_blocks.h"
 

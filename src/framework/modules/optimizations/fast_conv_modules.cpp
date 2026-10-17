@@ -1,4 +1,5 @@
 #include "engine/framework/modules/optimizations/fast_conv_modules.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "../tensor_layout_utils.h"
 

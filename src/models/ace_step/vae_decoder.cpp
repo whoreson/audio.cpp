@@ -1,4 +1,5 @@
 #include "engine/models/ace_step/vae_decoder.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "vae_common.h"
 

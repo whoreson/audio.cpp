@@ -1,4 +1,5 @@
 #include "engine/models/omnivoice/audio_tokenizer.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/audio/conversion.h"
 #include "engine/framework/audio/waveform_ops.h"

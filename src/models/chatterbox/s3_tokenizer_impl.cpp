@@ -1,4 +1,5 @@
 #include "components/component_weights.h"
+#include "engine/framework/core/ggml_compat.h"
 #include "components/audio_processing.h"
 
 #include "engine/framework/core/backend.h"

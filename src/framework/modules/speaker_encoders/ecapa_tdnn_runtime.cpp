@@ -1,4 +1,5 @@
 #include "engine/framework/modules/speaker_encoders/ecapa_tdnn_runtime.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/audio/conversion.h"
 #include "engine/framework/audio/dsp.h"

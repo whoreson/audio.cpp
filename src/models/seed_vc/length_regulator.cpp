@@ -1,4 +1,5 @@
 #include "engine/models/seed_vc/length_regulator.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/models/seed_vc/assets.h"
 

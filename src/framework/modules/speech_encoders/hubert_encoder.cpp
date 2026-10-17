@@ -1,4 +1,5 @@
 #include "engine/framework/modules/speech_encoders/hubert_encoder.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/assets/tensor_source.h"
 #include "engine/framework/core/backend.h"

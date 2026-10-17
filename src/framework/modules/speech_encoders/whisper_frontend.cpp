@@ -1,4 +1,5 @@
 #include "engine/framework/modules/speech_encoders/whisper_frontend.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/core/backend.h"
 #include "engine/framework/core/module.h"

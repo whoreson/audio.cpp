@@ -1,4 +1,5 @@
 #include "engine/models/ace_step/cover_tokenizer.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/core/backend.h"
 #include "engine/framework/core/backend_weight_store.h"

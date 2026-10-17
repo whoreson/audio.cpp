@@ -1,4 +1,5 @@
 #include "engine/framework/modules/conv_modules.h"
+#include "engine/framework/core/ggml_compat.h"
 #include "tensor_layout_utils.h"
 #include "engine/framework/core/backend.h"
 #include "engine/framework/modules/activation_modules.h"
@@ -304,8 +305,13 @@ core::TensorValue view_batch_matrix(
 bool is_conv_transpose1d_col2im_fast_path_eligible(
     const core::ModuleBuildContext & ctx,
     const ConvTranspose1dConfig & config) noexcept {
+#ifdef AUDIOCPP_GGML_IK_LLAMA
+    (void) ctx; (void) config;
+    return false;  // needs the patched ggml_col2im_1d, absent in ik_llama
+#else
     return (ctx.backend_type == core::BackendType::Cuda || ctx.backend_type == core::BackendType::Hip) &&
            config.dilation == 1;
+#endif
 }
 
 Conv1dModule::Conv1dModule(Conv1dConfig config) : config_(config) {

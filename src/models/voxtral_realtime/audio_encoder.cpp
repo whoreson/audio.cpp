@@ -1,4 +1,5 @@
 #include "engine/models/voxtral_realtime/audio_encoder.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/core/backend.h"
 #include "engine/framework/core/backend_weight_store.h"

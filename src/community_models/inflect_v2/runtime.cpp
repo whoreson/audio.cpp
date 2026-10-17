@@ -1,4 +1,5 @@
 #include "engine/community_models/inflect_v2/runtime.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/assets/tensor_source.h"
 #include "engine/framework/core/backend.h"

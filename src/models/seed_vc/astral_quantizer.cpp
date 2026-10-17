@@ -1,4 +1,5 @@
 #include "engine/models/seed_vc/astral_quantizer.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/models/seed_vc/assets.h"
 

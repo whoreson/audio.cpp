@@ -1,4 +1,5 @@
 #include "engine/models/ace_step/text_encoder.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/assets/tensor_source.h"
 #include "engine/framework/debug/profiler.h"

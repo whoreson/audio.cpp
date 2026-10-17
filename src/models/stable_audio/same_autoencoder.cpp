@@ -1,4 +1,5 @@
 #include "engine/models/stable_audio/same_autoencoder.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/audio/conversion.h"
 #include "engine/framework/audio/resampling.h"

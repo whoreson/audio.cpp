@@ -1,4 +1,5 @@
 #include "engine/framework/modules/optimizations/fast_projection_modules.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include <stdexcept>
 

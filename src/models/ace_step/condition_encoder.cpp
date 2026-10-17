@@ -1,4 +1,5 @@
 #include "engine/models/ace_step/condition_encoder.h"
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/framework/core/backend.h"
 #include "engine/framework/debug/profiler.h"
