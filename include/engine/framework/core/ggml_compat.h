@@ -539,4 +539,30 @@ static inline struct ggml_tensor * ggml_manual_attn_ext_impl(
     auto * out = ggml_mul_mat(ctx, v, scores_t);  // [HD, T_q, H]
     return out;
 }
+
+// ik_llama's typed add kernels (add_f32_f16, add_f16_f32) require exact
+// shape match but do not support broadcasting. Stock ggml handles broadcast
+// in the generic F32 kernel. We intercept ggml_add to pre-repeated the
+// smaller operand when types are mixed (F32+F16) and shapes differ.
+#define ggml_add(ctx, a, b)     ({         struct ggml_tensor * _a = (a); struct ggml_tensor * _b = (b);         if (((_a)->type == GGML_TYPE_F32 && (_b)->type == GGML_TYPE_F16) ||             ((_a)->type == GGML_TYPE_F16 && (_b)->type == GGML_TYPE_F32)) {             if (!ggml_are_same_shape(_a, _b)) _b = ggml_repeat(ctx, _b, _a);         }         ggml_add_impl((ctx), _a, _b, false);     })
+
+// Need the internal ggml_add_impl for the macro above
+// (it's not extern, so we call ggml_add from the compat function instead)
+#undef ggml_add
+static inline struct ggml_tensor * ggml_add_compat(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b)
+{
+    // ik_llama's typed add kernels require exact shape match for mixed types.
+    // Convert F16 operand to F32 so the F32+F32 broadcast path is taken.
+    if (a->type == GGML_TYPE_F32 && b->type == GGML_TYPE_F16) {
+        b = ggml_cast(ctx, b, GGML_TYPE_F32);
+    } else if (a->type == GGML_TYPE_F16 && b->type == GGML_TYPE_F32) {
+        a = ggml_cast(ctx, a, GGML_TYPE_F32);
+    }
+    return ggml_add(ctx, a, b);
+}
+// Macro to replace all ggml_add calls with the compat version
+#define ggml_add(ctx, a, b) ggml_add_compat(ctx, a, b)
 #endif // AUDIOCPP_GGML_IK_LLAMA
