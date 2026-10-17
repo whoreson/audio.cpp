@@ -61,7 +61,7 @@ static ggml_tensor* req(const std::map<std::string, ggml_tensor*>& m, const char
 }
 static uint32_t kv_u32(gguf_context* g, const char* k, uint32_t d) {
     int ki = gguf_find_key(g, k); if (ki < 0 || gguf_get_kv_type(g, ki) != GGUF_TYPE_UINT32) return d;
-    return static_cast<const uint32_t*>(gguf_get_arr_data(g, ki))[0];
+    return gguf_get_val_u32(g, ki);
 }
 
 static void h_ln(float* o, const float* i, const float* g, const float* b, int d) {

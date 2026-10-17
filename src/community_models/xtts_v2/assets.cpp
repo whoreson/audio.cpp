@@ -20,8 +20,7 @@ uint32_t gguf_kv_u32(gguf_context* gctx, const char* key, uint32_t def) {
     int ki = gguf_find_key(gctx, key);
     if (ki < 0) return def;
     if (gguf_get_kv_type(gctx, ki) != GGUF_TYPE_UINT32) return def;
-    const auto* data = static_cast<const uint32_t*>(gguf_get_arr_data(gctx, ki));
-    return data[0];
+    return gguf_get_val_u32(gctx, ki);
 }
 
 bool is_gguf_file(const std::string& name) {
@@ -126,7 +125,7 @@ std::optional<XttSv2Assets> load_xtts_v2_assets(const std::filesystem::path& roo
         gguf_context* vg = gguf_init_from_file(assets.vocoder_gguf_path.string().c_str(), {true, 0});
         if (vg) {
             int ki = gguf_find_key(vg, "xtts.mel_stats");
-            if (ki >= 0 && gguf_get_kv_type(vg, ki) == GGUF_TYPE_FLOAT32) {
+            if (ki >= 0 && gguf_get_kv_type(vg, ki) == GGUF_TYPE_ARRAY) {
                 int n = gguf_get_arr_n(vg, ki);
                 const float* data = static_cast<const float*>(gguf_get_arr_data(vg, ki));
                 assets.mel_stats.assign(data, data + n);

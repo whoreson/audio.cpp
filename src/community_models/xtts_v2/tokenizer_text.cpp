@@ -202,8 +202,7 @@ static uint32_t gguf_kv_u32(gguf_context* gctx, const char* key, uint32_t def) {
     int ki = gguf_find_key(gctx, key);
     if (ki < 0) return def;
     if (gguf_get_kv_type(gctx, ki) != GGUF_TYPE_UINT32) return def;
-    const auto* data = static_cast<const uint32_t*>(gguf_get_arr_data(gctx, ki));
-    return data[0];
+    return gguf_get_val_u32(gctx, ki);
 }
 
 static std::vector<std::string> gguf_kv_str_array(gguf_context* gctx, const char* key) {
@@ -327,7 +326,7 @@ bool load_xtts_v2_tokenizer(XttSv2BpeVocab* tok, const std::filesystem::path& gg
 
     // Scores
     { int ki = gguf_find_key(g, "tokenizer.ggml.scores");
-      if (ki >= 0 && gguf_get_kv_type(g, ki) == GGML_TYPE_F32) {
+      if (ki >= 0 && gguf_get_kv_type(g, ki) == GGUF_TYPE_ARRAY) {
           int n = gguf_get_arr_n(g, ki);
           const float* sd = static_cast<const float*>(gguf_get_arr_data(g, ki));
           tok->scores.assign(sd, sd + n);

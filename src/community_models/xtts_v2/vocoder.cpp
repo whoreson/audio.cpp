@@ -448,7 +448,7 @@ bool XttSv2Vocoder::load(const std::filesystem::path& path, int n_threads, bool 
     { gguf_context* g = gguf_init_from_file(path.string().c_str(), {true, 0});
       if (g) {
           int ki = gguf_find_key(g, "xtts.mel_stats");
-          if (ki >= 0 && gguf_get_kv_type(g, ki) == GGUF_TYPE_FLOAT32) {
+          if (ki >= 0 && gguf_get_kv_type(g, ki) == GGUF_TYPE_ARRAY) {
               int n = gguf_get_arr_n(g, ki);
               const float* d = static_cast<const float*>(gguf_get_arr_data(g, ki));
               mel_stats_.assign(d, d + n);
