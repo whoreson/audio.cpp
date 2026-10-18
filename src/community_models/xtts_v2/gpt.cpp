@@ -1069,10 +1069,10 @@ bool XttSv2GptEngine::load(const std::filesystem::path& gpt_path, const std::fil
     impl_ = new Impl(); impl_->n_threads = n_threads;
     impl_->backend = ggml_backend_cpu_init();
     if (!impl_->backend) return false;
-    if (!load_gguf(gpt_path.c_str(), impl_->backend, impl_->gpt_wl)) {
+    if (!load_gguf(gpt_path.string().c_str(), impl_->backend, impl_->gpt_wl)) {
         ggml_backend_free(impl_->backend); delete impl_; impl_ = nullptr; return false; }
     if (verbose) fprintf(stderr, "xtts_v2: loaded %d tensors from GPT GGUF\n", (int)impl_->gpt_wl.tensors.size());
-    gguf_context* gu = gguf_init_from_file(gpt_path.c_str(), {true, nullptr});
+    gguf_context* gu = gguf_init_from_file(gpt_path.string().c_str(), {true, nullptr});
     if (gu) {
         impl_->hp.n_layers = kv_u32(gu, "xtts.gpt.n_layers", 30);
         impl_->hp.d = kv_u32(gu, "xtts.gpt.d_model", 1024);
