@@ -49,6 +49,15 @@ if (NOT MSVC)
     set(CMAKE_CXX_FLAGS_DEBUG "${AUDIOCPP_DEBUG_OPT_FLAGS}" CACHE STRING "Optimized debug C++ flags" FORCE)
 endif()
 
+# Allow overriding the minimum Windows version at CMake configure time.
+# Defaults to Windows 7 (0x0601) for maximum compatibility. ggml.h sets 0x0A00
+# (Windows 10) by default, but this can fail to link on older systems.
+if (WIN32)
+    set(AUDIOCPP_WIN_MIN_VER "0x0601" CACHE STRING
+        "Minimum Windows version (hex: 0x0601=Win7, 0x0603=Win8.1, 0x0A00=Win10)")
+    add_compile_definitions(_WIN32_WINNT=${AUDIOCPP_WIN_MIN_VER})
+endif()
+
 set(ENGINE_DEFAULT_ENABLE_CUDA OFF)
 set(ENGINE_DEFAULT_ENABLE_HIP OFF)
 set(ENGINE_DEFAULT_ENABLE_VULKAN OFF)
