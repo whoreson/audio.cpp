@@ -202,6 +202,15 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
         if (T_mel <= 0) T_mel = mel_len;
         std::vector<float> latents_cm;
         const int n_hid = (int)decode_hiddens.size() / 1024;   // 1 + n_codes
+        // Debug hook: dump the INCREMENTAL decode hiddens (normal generation path)
+        if (const char* p = getenv("XTTS_DUMP_HIDDENS")) {
+            static int hid_call = 0;
+            char dp[512];
+            snprintf(dp, sizeof(dp), "%s.%d", p, hid_call++);
+            FILE* f = fopen(dp, "wb");
+            if (f) { fwrite(decode_hiddens.data(), 4, decode_hiddens.size(), f); fclose(f);
+                     fprintf(stderr, "xtts_dbg: dumped incremental hiddens to %s (%d frames)\n", dp, n_hid); }
+        }
         if (n_hid >= T_mel) {
             // decode_hiddens[0] is the start_mel position, which is exactly
             // where the reference slice begins (off = n_cond + text = Tpre-1).
