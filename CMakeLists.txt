@@ -168,6 +168,10 @@ if (EXISTS "${AUDIOCPP_GGML_SOURCE_DIR}/src/iqk/iqk_flash_attn.cpp")
     set(AUDIOCPP_GGML_IK_LLAMA TRUE)
     add_compile_definitions(AUDIOCPP_GGML_IK_LLAMA)
     message(STATUS "Detected ik_llama ggml fork - compatibility mode enabled")
+else()
+    message(WARNING "Using stock ggml (not ik_llama fork). Some features may lack ik_llama optimizations. "
+                     "For xTTSv2 performance, consider using the ik_llama fork: "
+                     "-DAUDIOCPP_GGML_SOURCE_DIR=/path/to/ik_llama.cpp/ggml")
 endif()
 add_subdirectory("${AUDIOCPP_GGML_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/ggml")
 add_subdirectory(external/sentencepiece EXCLUDE_FROM_ALL)
