@@ -163,6 +163,18 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
         auto mel_codes = c.gpt.generate_mel_codes(
             text_tokens, cond_latents, c.temperature, c.top_k, c.top_p,
             c.repetition_penalty, c.max_mel_tokens, &decode_hiddens);
+        // Debug hook: force a fixed mel code sequence (deterministic cross-platform A/B)
+        if (const char* fc = getenv("XTTS_FORCE_CODES")) {
+            mel_codes.clear(); decode_hiddens.clear();
+            int v = 0; bool any = false;
+            for (const char* q = fc; *q; ++q) {
+                if (*q >= '0' && *q <= '9') { v = v * 10 + (*q - '0'); any = true; }
+                else if (*q == ',' || *q == ' ') { if (any) mel_codes.push_back(v); v = 0; any = false; }
+            }
+            if (any) mel_codes.push_back(v);
+            fprintf(stderr, "xtts_dbg: FORCED %zu mel codes (first: %d)\n",
+                    mel_codes.size(), mel_codes.empty() ? -1 : mel_codes[0]);
+        }
         if (mel_codes.empty()) {
             throw std::runtime_error("xtts_v2: mel code generation produced no output");
         }
@@ -199,6 +211,15 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
             for (int t = 0; t < T_mel; t++)
                 for (int ch = 0; ch < 1024; ch++)
                     latents_cm[(size_t)ch * T_mel + t] = latents[(size_t)(off + t) * 1024 + ch];
+        }
+        // Debug hook: dump the decode latents (vocoder input, pre-interpolation)
+        if (const char* p = getenv("XTTS_DUMP_DEC_LAT")) {
+            static int dec_call = 0;
+            char dp[512];
+            snprintf(dp, sizeof(dp), "%s.%d", p, dec_call++);
+            FILE* f = fopen(dp, "wb");
+            if (f) { fwrite(latents_cm.data(), 4, latents_cm.size(), f); fclose(f);
+                     fprintf(stderr, "xtts_dbg: dumped decode latents to %s (%d frames)\n", dp, T_mel); }
         }
 
         const auto xtts_t2 = std::chrono::steady_clock::now();
