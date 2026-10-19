@@ -163,6 +163,20 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
         auto mel_codes = c.gpt.generate_mel_codes(
             text_tokens, cond_latents, c.temperature, c.top_k, c.top_p,
             c.repetition_penalty, c.max_mel_tokens, &decode_hiddens);
+        // Debug hook: dump the generated (sampled) mel codes
+        if (const char* p = getenv("XTTS_DUMP_CODES")) {
+            static int codes_call = 0;
+            char dp[512];
+            snprintf(dp, sizeof(dp), "%s.%d", p, codes_call++);
+            FILE* f = fopen(dp, "w");
+            if (f) {
+                for (size_t i = 0; i < mel_codes.size(); i++)
+                    fprintf(f, "%s%d", i ? "," : "", mel_codes[i]);
+                fprintf(f, "\n");
+                fclose(f);
+                fprintf(stderr, "xtts_dbg: dumped %zu mel codes to %s\n", mel_codes.size(), dp);
+            }
+        }
         // Debug hook: force a fixed mel code sequence (deterministic cross-platform A/B)
         if (const char* fc = getenv("XTTS_FORCE_CODES")) {
             mel_codes.clear(); decode_hiddens.clear();
