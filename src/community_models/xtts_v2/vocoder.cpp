@@ -489,22 +489,32 @@ std::vector<float> XttSv2Vocoder::generate(const float* latent, int T, const flo
                 mxcsr, (mxcsr >> 15) & 1, (mxcsr >> 6) & 1);
     }
 #endif
-    std::vector<float> ups(1024 * Tu, 0);
-    // Trace hook: dump or inject the interpolated vocoder input latents [1024 x Tu]
+    std::vector<float> ups;
+    // Trace hook: inject the interpolated vocoder input latents [1024 x Tu].
+    // The file is authoritative: Tu is derived from its size, so a dump produced
+    // with a different (stochastic) mel code count still replays exactly.
+    bool injected = false;
     if (const char* p = getenv("XTTS_INJECT_VOC_LAT")) {
         FILE* f = fopen(p, "rb");
         if (f) {
             fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-            if (sz == (long)(ups.size() * sizeof(float))) {
-                if (fread(ups.data(), 4, ups.size(), f) == ups.size())
-                    fprintf(stderr, "xtts_dbg: injected vocoder latents (%d frames)\n", Tu);
+            if (sz >= (long)(1024 * sizeof(float)) && sz % (long)(1024 * sizeof(float)) == 0) {
+                Tu = (int)(sz / (1024 * (long)sizeof(float)));
+                fprintf(stderr, "xtts_dbg: injected vocoder latents (%d frames, from file)\n", Tu);
+                injected = true;
+                ups.resize((size_t)1024 * Tu);
+                if (fread(ups.data(), 4, ups.size(), f) != ups.size()) {
+                    fprintf(stderr, "xtts_dbg: XTTS_INJECT_VOC_LAT short read\n");
+                    return {};
+                }
             } else {
-                fprintf(stderr, "xtts_dbg: XTTS_INJECT_VOC_LAT size mismatch: file=%ld expected=%zu\n",
-                        sz, ups.size() * sizeof(float));
+                fprintf(stderr, "xtts_dbg: XTTS_INJECT_VOC_LAT bad size: file=%ld (not multiple of 4096)\n", sz);
             }
             fclose(f);
         } else fprintf(stderr, "xtts_dbg: XTTS_INJECT_VOC_LAT could not open %s\n", p);
-    } else {
+    }
+    if (!injected) {
+        ups.assign((size_t)1024 * Tu, 0.f);
         for (int ch = 0; ch < 1024; ch++) for (int to = 0; to < Tu; to++) {
             float pos = (float)((to + 0.5) / scale_total - 0.5);
             if (pos < 0) pos = 0;
@@ -580,6 +590,7 @@ std::vector<float> XttSv2Vocoder::generate(const float* latent, int T, const flo
                  fprintf(stderr, "xtts_dbg: dumped vocoder output to %s (%zd samples)\n", dp, result.size()); }
     }
     ggml_gallocr_free(ga); ggml_free(ctx0);
+    voc_call++;
     return result;
 }
 
