@@ -1,6 +1,7 @@
 // xtts_v2 GPT engine -- GPT-2 AR + ConditioningEncoder + Perceiver resampler
 #include "engine/community_models/xtts_v2/gpt.h"
 #include "engine/framework/core/ggml_compat.h"
+#include "engine/framework/core/backend.h"
 #include "engine/community_models/xtts_v2/assets.h"
 #include "engine/community_models/xtts_v2/tokenizer_text.h"
 #include "ggml-alloc.h"
@@ -1048,10 +1049,10 @@ struct XttSv2GptEngine::Impl {
     GM model;
     XttSv2HyperParams hp;
     XttSv2BpeVocab vocab;
+    core::BackendConfig backend_config;
     ggml_backend_t backend = nullptr;
     ggml_context* graph_ctx = nullptr;
     GptKV kv;                       // persistent F16 KV cache (reused across chunks)
-    int n_threads = 4;
     std::vector<float> mel_norms;   // conditioning mel normalization (80 values)
 };
 
@@ -1064,14 +1065,16 @@ XttSv2GptEngine::~XttSv2GptEngine() {
         delete impl_; impl_ = nullptr; }
 }
 
-bool XttSv2GptEngine::load(const std::filesystem::path& gpt_path, const std::filesystem::path& /*voc_path*/, int n_threads, bool verbose) {
+bool XttSv2GptEngine::load(const std::filesystem::path& gpt_path, const std::filesystem::path& /*voc_path*/, const core::BackendConfig& backend_config) {
     if (impl_) { delete impl_; impl_ = nullptr; }
-    impl_ = new Impl(); impl_->n_threads = n_threads;
-    impl_->backend = ggml_backend_cpu_init();
+    impl_ = new Impl();
+    impl_->backend_config = backend_config;
+    impl_->backend = core::init_backend(backend_config);
     if (!impl_->backend) return false;
+    core::set_backend_threads(impl_->backend, backend_config.threads);
     if (!load_gguf(gpt_path.string().c_str(), impl_->backend, impl_->gpt_wl)) {
         ggml_backend_free(impl_->backend); delete impl_; impl_ = nullptr; return false; }
-    if (verbose) fprintf(stderr, "xtts_v2: loaded %d tensors from GPT GGUF\n", (int)impl_->gpt_wl.tensors.size());
+    fprintf(stderr, "xtts_v2: loaded %d tensors from GPT GGUF\n", (int)impl_->gpt_wl.tensors.size());
     gguf_context* gu = gguf_init_from_file(gpt_path.string().c_str(), {true, nullptr});
     if (gu) {
         impl_->hp.n_layers = kv_u32(gu, "xtts.gpt.n_layers", 30);
@@ -1090,6 +1093,17 @@ bool XttSv2GptEngine::load(const std::filesystem::path& gpt_path, const std::fil
         impl_->hp.stop_mel_token = (int)kv_u32(gu, "xtts.gpt.stop_mel_token", 1025);
         impl_->hp.cond_latents = (int)kv_u32(gu, "xtts.gpt.condition_num_latent", 32);
         impl_->hp.code_stride = (int)kv_u32(gu, "xtts.gpt.code_stride_len", 1024);
+        // Mel normalization stats embedded in GGUF metadata (xtts.mel_stats, 80 F32 array).
+        {
+            int ki = gguf_find_key(gu, "xtts.mel_stats");
+            if (ki >= 0 && gguf_get_kv_type(gu, ki) == GGUF_TYPE_ARRAY &&
+                gguf_get_arr_type(gu, ki) == GGUF_TYPE_FLOAT32) {
+                int n = gguf_get_arr_n(gu, ki);
+                const float* d = static_cast<const float*>(gguf_get_arr_data(gu, ki));
+                impl_->mel_norms.assign(d, d + n);
+                fprintf(stderr, "xtts_v2: mel_norms loaded from GGUF metadata (%d values)\n", n);
+            }
+        }
         gguf_free(gu);
     }
     if (!xtts_bind_tensors(impl_->model, impl_->gpt_wl.tensors, impl_->hp)) return false;
@@ -1097,15 +1111,6 @@ bool XttSv2GptEngine::load(const std::filesystem::path& gpt_path, const std::fil
         impl_->vocab.merges.resize(impl_->hp.text_vocab);
     }
     impl_->graph_ctx = ggml_init({1 << 24, nullptr, false});
-    // Conditioning mel stats live next to the GGUF (mel_norms.bin, 80 F32).
-    std::filesystem::path mn = gpt_path.parent_path() / "mel_norms.bin";
-    if (FILE* f = fopen(mn.string().c_str(), "rb")) {
-        impl_->mel_norms.resize(80);
-        size_t rd = fread(impl_->mel_norms.data(), 4, 80, f);
-        fclose(f);
-        if (rd != 80) impl_->mel_norms.clear();
-        else fprintf(stderr, "xtts_v2: mel_norms loaded from %s (80 values)\n", mn.string().c_str());
-    }
     return true;
 }
 
@@ -1184,7 +1189,8 @@ std::vector<int32_t> XttSv2GptEngine::generate_mel_codes(const std::vector<int32
     if (!impl_) return {};
     auto codes = gpt_gen(impl_->backend, impl_->kv, impl_->model, impl_->hp,
         std::vector<int>(text_tokens.begin(), text_tokens.end()), cond_latents,
-        temperature, top_k, top_p, rep_penalty, max_tokens, impl_->n_threads, decode_hiddens);
+        temperature, top_k, top_p, rep_penalty, max_tokens,
+        impl_->backend_config.threads, decode_hiddens);
     return std::vector<int32_t>(codes.begin(), codes.end());
 }
 std::vector<float> XttSv2GptEngine::extract_latents(const std::vector<int32_t>& text_tokens, const std::vector<int32_t>& mel_codes,
@@ -1193,7 +1199,8 @@ std::vector<float> XttSv2GptEngine::extract_latents(const std::vector<int32_t>& 
     ggml_context* ctx = ggml_init({(size_t)1 << 33, nullptr, false}); // 8GB for large graph
     auto latents = gpt_extract(ctx, impl_->backend, impl_->model, impl_->hp,
         std::vector<int>(text_tokens.begin(), text_tokens.end()),
-        std::vector<int>(mel_codes.begin(), mel_codes.end()), cond_latents, impl_->n_threads);
+        std::vector<int>(mel_codes.begin(), mel_codes.end()), cond_latents,
+        impl_->backend_config.threads);
     ggml_free(ctx); return latents;
 }
 
