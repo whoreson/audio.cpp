@@ -1,18 +1,18 @@
 // xtts_v2 vocoder -- HiFi-GAN + ResNet speaker encoder
 // Ported from CrispASR xtts_voc.cpp for audio.cpp framework.
-// MSVC's <cmath> only exposes M_PI with _USE_MATH_DEFINES; define it before
-// any include (framework headers may pull <cmath> in transitively).
-#ifndef _USE_MATH_DEFINES
-#define _USE_MATH_DEFINES
-#endif
+#include "engine/framework/core/ggml_compat.h"
 
 #include "engine/community_models/xtts_v2/vocoder.h"
 #include "engine/framework/core/backend.h"
 
 #include "ggml-backend.h"
+#ifndef AUDIOCPP_GGML_IK_LLAMA
 #include "ggml-cpu.h"
+#endif
 #include "ggml.h"
+#ifndef AUDIOCPP_GGML_IK_LLAMA
 #include "gguf.h"
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -25,6 +25,9 @@
 #include <numeric>
 #include <string>
 #include <vector>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 
 namespace engine::models::xtts_v2 {
 namespace {
@@ -76,17 +79,17 @@ static ggml_tensor* bn4d(ggml_context* ctx, ggml_tensor* x, const std::string& p
 
 // HiFi-GAN graph
 static ggml_cgraph* build_hifigan(ggml_context* ctx0,
-    const std::map<std::string, ggml_tensor*>& ts, int T_mel, bool use_spk, ggml_tensor* spk_in) {
+    const std::map<std::string, ggml_tensor*>& ts, int T_mel, bool use_spk, ggml_tensor* spk_in,
+    bool trace) {
     ggml_cgraph* gf = ggml_new_graph(ctx0);
-    // T_mel here is the ALREADY-upsampled frame count (host-side linear interp above);
-    // the graph input is [frames, 1024] channel-major.
     ggml_tensor* x = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, T_mel, 1024);
     ggml_set_name(x, "voc_input"); ggml_set_input(x);
     x = conv1d(ctx0, x, T(ts, "hifigan_decoder.dec.conv_pre.weight"),
                T(ts, "hifigan_decoder.dec.conv_pre.bias"), 1, 3, 1);
+    if (trace) { ggml_set_name(x, "voc_conv_pre"); ggml_set_output(x); ggml_build_forward_expand(gf, x); }
     if (use_spk) {
         auto* c = T(ts, "hifigan_decoder.dec.cond_layer.weight");
-        auto* s = spk_in;  // shared input tensor for all 5 conditioning points
+        auto* s = spk_in;
         auto* p = ggml_cont(ctx0, ggml_transpose(ctx0,
             ggml_mul_mat(ctx0, ggml_reshape_2d(ctx0, c, (int)c->ne[1], (int)c->ne[2]),
                          ggml_reshape_2d(ctx0, s, 512, 1))));
@@ -103,7 +106,7 @@ static ggml_cgraph* build_hifigan(ggml_context* ctx0,
         if (use_spk) {
             std::string cw = "hifigan_decoder.dec.conds." + std::to_string(i) + ".weight";
             auto* w = T(ts, cw);
-            auto* s = spk_in;  // same shared input tensor
+            auto* s = spk_in;
             auto* p = ggml_cont(ctx0, ggml_transpose(ctx0,
                 ggml_mul_mat(ctx0, ggml_reshape_2d(ctx0, w, (int)w->ne[1], (int)w->ne[2]),
                              ggml_reshape_2d(ctx0, s, 512, 1))));
@@ -118,10 +121,12 @@ static ggml_cgraph* build_hifigan(ggml_context* ctx0,
             rs = rs ? ggml_add(ctx0, rs, rb) : rb;
         }
         x = ggml_scale(ctx0, rs, 1.0f / 3);
+        if (trace) { char nm[32]; snprintf(nm, sizeof(nm), "voc_ups%d", i); ggml_set_name(x, nm); ggml_set_output(x); ggml_build_forward_expand(gf, x); }
     }
     x = ggml_leaky_relu(ctx0, x, 0.1f, false);
     x = conv1d(ctx0, x, T(ts, "hifigan_decoder.dec.conv_post.weight"),
                T(ts, "hifigan_decoder.dec.conv_post.bias"), 1, 3, 1);
+    if (trace) { ggml_set_name(x, "voc_post"); ggml_set_output(x); ggml_build_forward_expand(gf, x); }
     x = ggml_tanh(ctx0, x);
     ggml_set_name(x, "voc_output"); ggml_set_output(x);
     ggml_build_forward_expand(gf, x);
@@ -490,14 +495,22 @@ static ggml_cgraph* build_spk_enc(ggml_context* ctx0,
     // reference stem: conv1 -> relu -> bn1
     ggml_tensor* h = ggml_conv_2d(ctx0, T(ts, "hifigan_decoder.se.conv1.weight"), x, 1, 1, 1, 1, 1, 1);
     h = ggml_add(ctx0, h, ggml_repeat(ctx0, ggml_reshape_4d(ctx0, T(ts, "hifigan_decoder.se.conv1.bias"), 1, 1, (int)h->ne[2], 1), h));
+    if (getenv("XTTS_DUMP_SPK_NET")) { ggml_set_name(h, "spk_net_conv1"); ggml_set_output(h); ggml_build_forward_expand(gf, h); }
     h = ggml_relu(ctx0, h);
     h = apply_bn4d(ctx0, h, T(ts, "hifigan_decoder.se.bn1.rm"), T(ts, "hifigan_decoder.se.bn1.rv"),
                    T(ts, "hifigan_decoder.se.bn1.weight"), T(ts, "hifigan_decoder.se.bn1.bias"));
+    if (getenv("XTTS_DUMP_SPK_NET")) { ggml_set_name(h, "spk_net_stem"); ggml_set_output(h); ggml_build_forward_expand(gf, h); }
     int lf[4] = {32,64,128,256}, lb[4] = {3,4,6,3};
     for (int ly = 0; ly < 4; ly++) {
         for (int bl = 0; bl < lb[ly]; bl++) {
             std::string pfx = "hifigan_decoder.se.layer" + std::to_string(ly + 1) + "." + std::to_string(bl);
             h = se_basic(ctx0, h, ts, pfx, lf[ly], (bl == 0 && ly > 0));
+        }
+        if (getenv("XTTS_DUMP_SPK_NET")) {
+            char nm[64];
+            snprintf(nm, sizeof(nm), "spk_net_layer%d", ly + 1);
+            ggml_set_name(h, nm); ggml_set_output(h);
+            ggml_build_forward_expand(gf, h);
         }
     }
     int Ws = (int)h->ne[0], Hs = (int)h->ne[1], Cs = (int)h->ne[2];
@@ -527,6 +540,8 @@ static ggml_cgraph* build_spk_enc(ggml_context* ctx0,
     // softmax over time (ne[0]); w sums to 1 per channel row
     a2 = ggml_soft_max(ctx0, a2);
     // mu = sum_t x*w  [2048], sg = sqrt(clamp(sum_t x^2*w - mu^2))  [2048]
+    fprintf(stderr, "xtts_spk_dbg: xf=[%lld,%lld] a1=[%lld,%lld] a2=[%lld,%lld]\n",
+        (long long)xf->ne[0], (long long)xf->ne[1], (long long)a1->ne[0], (long long)a1->ne[1], (long long)a2->ne[0], (long long)a2->ne[1]);
     ggml_tensor* xw = ggml_mul(ctx0, xf, a2);
     int CH = Cs * Hs;
     ggml_tensor* mu = ggml_reshape_2d(ctx0, ggml_sum_rows(ctx0, xw), CH, 1);   // [2048, 1]
@@ -737,7 +752,7 @@ bool XttSv2Vocoder::load(const std::filesystem::path& path, const core::BackendC
     { gguf_context* g = gguf_init_from_file(path.string().c_str(), {true, 0});
       if (g) {
           int ki = gguf_find_key(g, "xtts.mel_stats");
-          if (ki >= 0 && gguf_get_kv_type(g, ki) == GGUF_TYPE_FLOAT32) {
+          if (ki >= 0 && gguf_get_kv_type(g, ki) == GGUF_TYPE_ARRAY) {
               int n = gguf_get_arr_n(g, ki);
               const float* d = static_cast<const float*>(gguf_get_arr_data(g, ki));
               mel_stats_.assign(d, d + n);
@@ -753,6 +768,12 @@ bool XttSv2Vocoder::load(const std::filesystem::path& path, const core::BackendC
 std::vector<float> XttSv2Vocoder::generate(const float* latent, int T, const float* spk_emb) const {
     if (!impl_ || !latent || T <= 0) return {};
     auto& c = *impl_;
+    static int voc_call = 0;
+    auto path_for = [](const char* base) {
+        static char buf[512];
+        snprintf(buf, sizeof(buf), "%s.%d", base, voc_call);
+        return buf;
+    };
     // Reference HifiDecoder.forward: TWO chained linear interpolates (align_corners=False):
     //   Stage 1) scale_factor = ar_mel_length_compression / output_hop_length = 1024/256 = 4
     //   Stage 2) scale_factor = output_sample_rate / input_sample_rate = 24000/22050
@@ -773,16 +794,73 @@ std::vector<float> XttSv2Vocoder::generate(const float* latent, int T, const flo
             stage1[(size_t)ch * T1 + to] = latent[(size_t)ch * T + t0] * (1.0f - f) + latent[(size_t)ch * T + t1] * f;
         }
     int Tu = (int)(T1 * s2);
-    std::vector<float> ups(1024 * Tu, 0);
-    for (int ch = 0; ch < 1024; ch++)
-        for (int to = 0; to < Tu; to++) {
-            float pos = (float)((to + 0.5) / s2 - 0.5);
-            if (pos < 0) pos = 0;
-            if (pos > T1 - 1) pos = T1 - 1;
-            int t0 = (int)pos, t1 = std::min(t0 + 1, T1 - 1);
-            float f = pos - t0;
-            ups[(size_t)ch * Tu + to] = stage1[(size_t)ch * T1 + t0] * (1.0f - f) + stage1[(size_t)ch * T1 + t1] * f;
+#if defined(__x86_64__) || defined(_M_X64)
+    if (getenv("XTTS_DEBUG")) {
+        unsigned mxcsr = _mm_getcsr();
+        fprintf(stderr, "xtts_dbg: vocoder mxcsr=0x%08x (FTZ=%d DAZ=%d)\n",
+                mxcsr, (mxcsr >> 15) & 1, (mxcsr >> 6) & 1);
+    }
+#endif
+    std::vector<float> ups;
+    // Trace hook: inject the interpolated vocoder input latents [1024 x Tu].
+    // The file is authoritative: Tu is derived from its size, so a dump produced
+    // with a different (stochastic) mel code count still replays exactly.
+    bool injected = false;
+    if (const char* p = getenv("XTTS_INJECT_VOC_LAT")) {
+        FILE* f = fopen(p, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+            if (sz >= (long)(1024 * sizeof(float)) && sz % (long)(1024 * sizeof(float)) == 0) {
+                Tu = (int)(sz / (1024 * (long)sizeof(float)));
+                fprintf(stderr, "xtts_dbg: injected vocoder latents (%d frames, from file)\n", Tu);
+                injected = true;
+                ups.resize((size_t)1024 * Tu);
+                if (fread(ups.data(), 4, ups.size(), f) != ups.size()) {
+                    fprintf(stderr, "xtts_dbg: XTTS_INJECT_VOC_LAT short read\n");
+                    return {};
+                }
+            } else {
+                fprintf(stderr, "xtts_dbg: XTTS_INJECT_VOC_LAT bad size: file=%ld (not multiple of 4096)\n", sz);
+            }
+            fclose(f);
+        } else fprintf(stderr, "xtts_dbg: XTTS_INJECT_VOC_LAT could not open %s\n", p);
+    }
+    if (!injected) {
+        ups.assign((size_t)1024 * Tu, 0.f);
+        for (int ch = 0; ch < 1024; ch++)
+            for (int to = 0; to < Tu; to++) {
+                float pos = (float)((to + 0.5) / s2 - 0.5);
+                if (pos < 0) pos = 0;
+                if (pos > T1 - 1) pos = T1 - 1;
+                int t0 = (int)pos, t1 = std::min(t0 + 1, T1 - 1);
+                float f = pos - t0;
+                ups[(size_t)ch * Tu + to] = stage1[(size_t)ch * T1 + t0] * (1.0f - f) + stage1[(size_t)ch * T1 + t1] * f;
+            }
+        if (const char* p = getenv("XTTS_DUMP_VOC_LAT")) {
+            const char* dp = path_for(p);
+            FILE* f = fopen(dp, "wb");
+            if (f) { fwrite(ups.data(), 4, ups.size(), f); fclose(f);
+                     fprintf(stderr, "xtts_dbg: dumped vocoder latents to %s (%d frames)\n", dp, Tu); }
         }
+    }
+    // Trace hook: dump or inject the speaker embedding [512]
+    static thread_local std::vector<float> spk_trace;
+    if (spk_emb) {
+        if (const char* p = getenv("XTTS_INJECT_VOC_SPK")) {
+            FILE* f = fopen(p, "rb");
+            if (f) { spk_trace.resize(512);
+                     if (fread(spk_trace.data(), 4, 512, f) == 512)
+                         fprintf(stderr, "xtts_dbg: injected speaker embedding\n");
+                     fclose(f); }
+        } else {
+            if (const char* p = getenv("XTTS_DUMP_VOC_SPK")) {
+                const char* dp = path_for(p);
+                FILE* f = fopen(dp, "wb");
+                if (f) { fwrite(spk_emb, 4, 512, f); fclose(f);
+                         fprintf(stderr, "xtts_dbg: dumped speaker embedding to %s\n", dp); }
+            }
+        }
+    }
     size_t need = 128 * 1024 * 1024;
     if (c.compute_meta.size() < need) c.compute_meta.resize(need);
     ggml_context* ctx0 = ggml_init({need, c.compute_meta.data(), true});
@@ -792,7 +870,8 @@ std::vector<float> XttSv2Vocoder::generate(const float* latent, int T, const flo
         spk_t = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 512);
         ggml_set_name(spk_t, "speaker_emb"); ggml_set_input(spk_t);
     }
-    ggml_cgraph* gf = build_hifigan(ctx0, c.tensors, Tu, spk_emb != nullptr, spk_t);
+    const bool voc_net_trace = getenv("XTTS_DUMP_VOC_NET") != nullptr;
+    ggml_cgraph* gf = build_hifigan(ctx0, c.tensors, Tu, spk_emb != nullptr, spk_t, voc_net_trace);
     // Allocate input tensors (tracked for cleanup)
     ggml_backend_buffer_t vin_buf = nullptr;
     ggml_backend_buffer_t spk_buf = nullptr;
@@ -805,7 +884,9 @@ std::vector<float> XttSv2Vocoder::generate(const float* latent, int T, const flo
         spk_buf = ggml_backend_alloc_buffer(c.backend_cpu, ggml_nbytes(spk_t));
         spk_t->buffer = spk_buf;
         spk_t->data = (void*)ggml_backend_buffer_get_base(spk_buf);
-        ggml_backend_tensor_set(spk_t, spk_emb, 0, 512 * sizeof(float));
+        const float* spk_data = spk_emb;
+        if (spk_trace.size() == 512) spk_data = spk_trace.data();
+        ggml_backend_tensor_set(spk_t, spk_data, 0, 512 * sizeof(float));
     }
     ggml_gallocr_t ga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(c.backend_cpu));
     if (!ga || !ggml_gallocr_reserve(ga, gf)) {
@@ -823,9 +904,17 @@ std::vector<float> XttSv2Vocoder::generate(const float* latent, int T, const flo
         ggml_gallocr_free(ga); ggml_free(ctx0); return {}; }
     std::vector<float> result(Ta);
     ggml_backend_tensor_get(out, result.data(), 0, Ta * sizeof(float));
+    // Trace hook: dump vocoder output floats
+    if (const char* p = getenv("XTTS_DUMP_VOC_OUT")) {
+        const char* dp = path_for(p);
+        FILE* f = fopen(dp, "wb");
+        if (f) { fwrite(result.data(), 4, result.size(), f); fclose(f);
+                 fprintf(stderr, "xtts_dbg: dumped vocoder output to %s (%zd samples)\n", dp, result.size()); }
+    }
     ggml_backend_buffer_free(vin_buf);
     ggml_backend_buffer_free(spk_buf);
     ggml_gallocr_free(ga); ggml_free(ctx0);
+    voc_call++;
     return result;
 }
 
@@ -848,8 +937,30 @@ std::vector<float> XttSv2Vocoder::speaker_embed(const float* ref_pcm, int n_samp
     std::vector<float> pre(pcm16.size());
     for (int i = (int)pcm16.size() - 1; i > 0; i--) pre[i] = pcm16[i] - 0.97f * pcm16[i - 1];
     if (!pcm16.empty()) pre[0] = pcm16[0];
+    if (getenv("XTTS_DUMP_SPK_PRE")) {
+        FILE* f = fopen(getenv("XTTS_DUMP_SPK_PRE"), "wb");
+        if (f) { fwrite(pre.data(), 4, pre.size(), f); fclose(f); }
+    }
+    auto ts0 = std::chrono::steady_clock::now();
     auto mel = compute_mel_hamming(pre.data(), (int)pre.size(), 16000, 512, 160, 400, 64, 0, 8000);
+    auto ts1 = std::chrono::steady_clock::now();
+    if (getenv("XTTS_TIMING")) fprintf(stderr, "xtts_timing:   spk mel=%.2f s\n", std::chrono::duration<double>(ts1 - ts0).count());
+    if (mel.empty()) return {};
     for (auto& v : mel) v = logf(v + 1e-6f); // LOGFIX
+    if (getenv("XTTS_INJECT_SPK_MEL")) {
+        // bypass: load reference log-mel (64 x T, channel-major) for numerical debugging
+        FILE* f = fopen(getenv("XTTS_INJECT_SPK_MEL"), "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+            std::vector<float> refmel(sz / 4);
+            if (fread(refmel.data(), 4, refmel.size(), f) == refmel.size()) mel = std::move(refmel);
+            fclose(f);
+        }
+    }
+    if (getenv("XTTS_DUMP_SPK_MEL")) {
+        FILE* f = fopen(getenv("XTTS_DUMP_SPK_MEL"), "wb");
+        if (f) { fwrite(mel.data(), 4, mel.size(), f); fclose(f); }
+    }
     int Tm = (int)mel.size() / 64;
     // InstanceNorm1d(64): per-channel zero-mean unit-variance over time
     for (int ch = 0; ch < 64; ch++) {
@@ -872,9 +983,15 @@ std::vector<float> XttSv2Vocoder::speaker_embed(const float* ref_pcm, int n_samp
     if (!ggml_gallocr_alloc_graph(ga, gf)) { ggml_gallocr_free(ga); ggml_free(ctx0); return {}; }
     ggml_tensor* mel_in = ggml_graph_get_tensor(gf, "speaker_mel");
     ggml_backend_tensor_set(mel_in, mel.data(), 0, mel.size() * sizeof(float));
-if (ggml_backend_graph_compute(c.backend_cpu, gf) != GGML_STATUS_SUCCESS) {
+    auto ts2 = std::chrono::steady_clock::now();
+    if (getenv("XTTS_TIMING")) fprintf(stderr, "xtts_timing:   spk graph build+set=%.2f s\n", std::chrono::duration<double>(ts2 - ts1).count());
+    auto ts3 = std::chrono::steady_clock::now();
+    if (getenv("XTTS_GRAPH_PRINT")) ggml_graph_print(gf);
+    if (ggml_backend_graph_compute(c.backend_cpu, gf) != GGML_STATUS_SUCCESS) {
         ggml_gallocr_free(ga); ggml_free(ctx0); return {};
     }
+    auto ts4 = std::chrono::steady_clock::now();
+    if (getenv("XTTS_TIMING")) fprintf(stderr, "xtts_timing:   spk graph compute=%.2f s\n", std::chrono::duration<double>(ts4 - ts3).count());
     ggml_tensor* out = ggml_graph_node(gf, ggml_graph_n_nodes(gf) - 1);
     std::vector<float> result(512);
     ggml_backend_tensor_get(out, result.data(), 0, 512 * sizeof(float));

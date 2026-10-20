@@ -128,6 +128,7 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
 
     // Resample the reference to 22.05 kHz once; reuse cached conditioning when the
     // reference content is unchanged across requests (frequent-graph reuse).
+    const auto xtts_cache_t0 = std::chrono::steady_clock::now();
     std::vector<float> ref_pcm;
     if (ref_buf->sample_rate != 22050) {
         ref_pcm = engine::audio::resample_mono_torchaudio_sinc_hann(
@@ -149,6 +150,7 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
         const int spk_ns = (int)std::min<size_t>(ref_pcm.size(), (size_t)max_ref_ns);
         spk = c.vocoder.speaker_embed(ref_pcm.data(), spk_ns);
         if (spk.empty()) throw std::runtime_error("xtts_v2: speaker encoder failed on reference audio");
+        if (getenv("XTTS_TIMING")) fprintf(stderr, "xtts_timing: cond+spk (cache miss) = %.2f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now()-xtts_cache_t0).count());
         c.ref_cache = Impl::RefCache{std::move(ref_pcm), std::move(cond), std::move(spk)};
     }
     const auto& cond_latents = c.ref_cache.cond;
@@ -172,9 +174,36 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
         // during decoding; these are exactly what a teacher-forced second pass
         // (extract_latents) would recompute, so the second pass is skipped.
         std::vector<float> decode_hiddens;   // [start_mel, c1, c2, ...] x 1024
+        const auto xtts_chunk_t0 = std::chrono::steady_clock::now();
         auto mel_codes = c.gpt.generate_mel_codes(
             text_tokens, cond_latents, temperature, top_k, top_p,
             repetition_penalty, max_mel_tokens, &decode_hiddens);
+        // Debug hook: dump the generated (sampled) mel codes
+        if (const char* p = getenv("XTTS_DUMP_CODES")) {
+            static int codes_call = 0;
+            char dp[512];
+            snprintf(dp, sizeof(dp), "%s.%d", p, codes_call++);
+            FILE* f = fopen(dp, "w");
+            if (f) {
+                for (size_t i = 0; i < mel_codes.size(); i++)
+                    fprintf(f, "%s%d", i ? "," : "", mel_codes[i]);
+                fprintf(f, "\n");
+                fclose(f);
+                fprintf(stderr, "xtts_dbg: dumped %zu mel codes to %s\n", mel_codes.size(), dp);
+            }
+        }
+        // Debug hook: force a fixed mel code sequence (deterministic cross-platform A/B)
+        if (const char* fc = getenv("XTTS_FORCE_CODES")) {
+            mel_codes.clear(); decode_hiddens.clear();
+            int v = 0; bool any = false;
+            for (const char* q = fc; *q; ++q) {
+                if (*q >= '0' && *q <= '9') { v = v * 10 + (*q - '0'); any = true; }
+                else if (*q == ',' || *q == ' ') { if (any) mel_codes.push_back(v); v = 0; any = false; }
+            }
+            if (any) mel_codes.push_back(v);
+            fprintf(stderr, "xtts_dbg: FORCED %zu mel codes (first: %d)\n",
+                    mel_codes.size(), mel_codes.empty() ? -1 : mel_codes[0]);
+        }
         if (mel_codes.empty()) {
             throw std::runtime_error("xtts_v2: mel code generation produced no output");
         }
@@ -188,6 +217,15 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
         if (T_mel <= 0) T_mel = mel_len;
         std::vector<float> latents_cm;
         const int n_hid = (int)decode_hiddens.size() / 1024;   // 1 + n_codes
+        // Debug hook: dump the INCREMENTAL decode hiddens (normal generation path)
+        if (const char* p = getenv("XTTS_DUMP_HIDDENS")) {
+            static int hid_call = 0;
+            char dp[512];
+            snprintf(dp, sizeof(dp), "%s.%d", p, hid_call++);
+            FILE* f = fopen(dp, "wb");
+            if (f) { fwrite(decode_hiddens.data(), 4, decode_hiddens.size(), f); fclose(f);
+                     fprintf(stderr, "xtts_dbg: dumped incremental hiddens to %s (%d frames)\n", dp, n_hid); }
+        }
         if (n_hid >= T_mel) {
             // decode_hiddens[0] is the start_mel position, which is exactly
             // where the reference slice begins (off = n_cond + text = Tpre-1).
@@ -212,9 +250,23 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
                 for (int ch = 0; ch < 1024; ch++)
                     latents_cm[(size_t)ch * T_mel + t] = latents[(size_t)(off + t) * 1024 + ch];
         }
+        // Debug hook: dump the decode latents (vocoder input, pre-interpolation)
+        if (const char* p = getenv("XTTS_DUMP_DEC_LAT")) {
+            static int dec_call = 0;
+            char dp[512];
+            snprintf(dp, sizeof(dp), "%s.%d", p, dec_call++);
+            FILE* f = fopen(dp, "wb");
+            if (f) { fwrite(latents_cm.data(), 4, latents_cm.size(), f); fclose(f);
+                     fprintf(stderr, "xtts_dbg: dumped decode latents to %s (%d frames)\n", dp, T_mel); }
+        }
 
+        const auto xtts_t2 = std::chrono::steady_clock::now();
         auto chunk_wave = c.vocoder.generate(latents_cm.data(), T_mel,
                                              spk_emb.empty() ? nullptr : spk_emb.data());
+        const auto xtts_t3 = std::chrono::steady_clock::now();
+        if (getenv("XTTS_TIMING")) fprintf(stderr, "xtts_timing: chunk gen+latents=%.2f vocoder=%.2f\n",
+            std::chrono::duration<double>(xtts_t2-xtts_chunk_t0).count(),
+            std::chrono::duration<double>(xtts_t3-xtts_t2).count());
         if (chunk_wave.empty()) {
             throw std::runtime_error("xtts_v2: vocoder produced no output");
         }
