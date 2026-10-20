@@ -159,6 +159,306 @@ static ggml_tensor* se_blk(ggml_context* ctx, ggml_tensor* x, int C,
     return ggml_mul(ctx, x, ggml_repeat(ctx, g4, x));
 }
 
+// ---- Host-side speaker encoder (bypasses ggml conv_2d which is broken on MinGW/ik_llama) ----
+
+static std::vector<float> read_tensor_f32(ggml_tensor* t) {
+    std::vector<float> v(ggml_nelements(t));
+    if (t->type == GGML_TYPE_F32) {
+        memcpy(v.data(), t->data, ggml_nbytes(t));
+    } else {
+        ggml_backend_tensor_get(t, v.data(), 0, ggml_nbytes(t));
+    }
+    return v;
+}
+
+// conv2d host: input [W,H,C] (contiguous x[w + W*(h + H*c)]),
+// weight [KW,KH,IC,OC] contiguous w[kw + KW*(kh + KH*(ic + KH*IC*oc))],
+// output [OW,OH,OC] contiguous out[ow + OW*(oh + OH*oc)]
+#if 0  // host-side speaker encoder (keep for debugging ggml conv_2d issues)
+static void host_conv2d_simple(const float* __restrict inp, int W, int H, int C,
+    const float* __restrict w, int KW, int KH, int IC, int OC,
+    const float* __restrict bias,
+    float* __restrict out, int s0, int s1, int p0, int p1) {
+    int OW = (W + 2*p0 - KW)/s0 + 1;
+    int OH = (H + 2*p1 - KH)/s1 + 1;
+    memset(out, 0, OW*OH*OC*sizeof(float));
+    // GGUF weight stride: oc_step = KW*KH*IC
+    int oc_step = KW * KH * IC;
+    for (int oh = 0; oh < OH; oh++)
+        for (int ow = 0; ow < OW; ow++)
+            for (int oc = 0; oc < OC; oc++) {
+                float s = bias ? bias[oc] : 0.0f;
+                for (int kh = 0; kh < KH; kh++)
+                    for (int kw = 0; kw < KW; kw++)
+                        for (int ic = 0; ic < IC; ic++) {
+                            int iw = ow*s0 + kw - p0;
+                            int ih = oh*s1 + kh - p1;
+                            if (ih >= 0 && ih < H && iw >= 0 && iw < W) {
+                                float ip = inp[iw + W*(ih + H*ic)];
+                                float wp = w[kw + KW*(kh + KH*ic) + oc*oc_step];
+                                s += ip * wp;
+                            }
+                        }
+                out[ow + OW*(oh + OH*oc)] = s;
+            }
+}
+
+// batchnorm2d: per-channel over [W,H], eps=1e-5 folded into rv
+static void host_bn2d(float* __restrict x, int W, int H, int C,
+    const float* __restrict rm, const float* __restrict rv,
+    const float* __restrict wt, const float* __restrict bt) {
+    for (int c = 0; c < C; c++) {
+        float m = rm[c], v = rv[c], w = wt[c], b = bt[c];
+        float inv = 1.0f / sqrtf(v + 1e-5f);
+        for (int h = 0; h < H; h++)
+            for (int w = 0; w < W; w++) {
+                float* px = x + w + W*(h + H*c);
+                *px = (*px - m) * inv * w + b;
+            }
+    }
+}
+
+static void host_relu(float* x, int N) {
+    for (int i = 0; i < N; i++) if (x[i] < 0) x[i] = 0.0f;
+}
+
+// Squeeze-and-Excitation block
+static void host_se_blk(float* __restrict x, int W, int H, int C,
+    const float* f0w, const float* f0b, int r,  // fc.0: [r, C]
+    const float* f2w, const float* f2b) {       // fc.2: [C, r]
+    // global avg pool -> [C]
+    float mean[256];
+    memset(mean, 0, C*sizeof(float));
+    for (int c = 0; c < C; c++)
+        for (int h = 0; h < H; h++)
+            for (int w = 0; w < W; w++)
+                mean[c] += x[w + W*(h + H*c)];
+    for (int c = 0; c < C; c++) mean[c] /= (W*H);
+    // fc.0: relu(r x C @ C) = relu(mean * f0w + f0b)
+    float h[256];
+    for (int i = 0; i < r; i++) {
+        float s = f0b[i];
+        for (int c = 0; c < C; c++) s += mean[c] * f0w[c + C*i];
+        h[i] = s > 0 ? s : 0.0f;
+    }
+    // fc.2: sigmoid(C x r @ r) = sigmoid(h * f2w + f2b)
+    float g[256];
+    for (int c = 0; c < C; c++) {
+        float s = f2b[c];
+        for (int i = 0; i < r; i++) s += h[i] * f2w[i + r*c];
+        g[c] = 1.0f / (1.0f + expf(-s));
+    }
+    // apply
+    for (int c = 0; c < C; c++)
+        for (int h = 0; h < H; h++)
+            for (int w = 0; w < W; w++)
+                x[w + W*(h + H*c)] *= g[c];
+}
+// se_basic block (host)
+static std::vector<float> host_spk_enc(const float* mel, int Tm,
+    const std::map<std::string, ggml_tensor*>& ts) {
+    // mel layout: [ch * Tm + t]  ->  as 4D [W=Tm, H=64, C=1, N=1]: x[w + W*(h + H*c)]
+    // But mel is channel-major: mel[ch*Tm + t]. Map to x[t + Tm*(ch + 64*0)] = mel[ch*Tm + t].
+    // So x[w + Tm*h] = mel[h*Tm + w]. Already matches!
+
+    // conv1: [3,3,1,32] F32, bias [32] F32
+    auto c1w = read_tensor_f32(ts.at("hifigan_decoder.se.conv1.weight"));
+    auto c1b = read_tensor_f32(ts.at("hifigan_decoder.se.conv1.bias"));
+    std::vector<float> x(Tm*64);
+    memcpy(x.data(), mel, Tm*64*sizeof(float)); // [W=Tm, H=64, C=1]
+
+    // conv1 -> bias -> relu -> bn1
+    std::vector<float> h(Tm*64*32);
+    host_conv2d_simple(x.data(), Tm, 64, 1, c1w.data(), 3, 3, 1, 32, c1b.data(), h.data(), 1, 1, 1, 1);
+    host_relu(h.data(), Tm*64*32);
+    host_bn2d(h.data(), Tm, 64, 32,
+        read_tensor_f32(ts.at("hifigan_decoder.se.bn1.rm")).data(),
+        read_tensor_f32(ts.at("hifigan_decoder.se.bn1.rv")).data(),
+        read_tensor_f32(ts.at("hifigan_decoder.se.bn1.weight")).data(),
+        read_tensor_f32(ts.at("hifigan_decoder.se.bn1.bias")).data());
+
+    // Layers: lf[4]={32,64,128,256}, lb[4]={3,4,6,3}
+    int lf[4] = {32,64,128,256}, lb[4] = {3,4,6,3};
+    int curW = Tm, curH = 64, curC = 32;
+    std::vector<float> buf;
+
+    for (int ly = 0; ly < 4; ly++) {
+        bool first = (ly > 0); // downsample at first block of each layer after layer0
+        for (int bl = 0; bl < lb[ly]; bl++) {
+            bool ds = first && (bl == 0);
+            std::string pfx = "hifigan_decoder.se.layer" + std::to_string(ly+1) + "." + std::to_string(bl);
+            auto p_c1w = read_tensor_f32(ts.at(pfx + ".conv1.weight"));
+            auto p_c2w = read_tensor_f32(ts.at(pfx + ".conv2.weight"));
+            auto p_bn1_rm = read_tensor_f32(ts.at(pfx + ".bn1.rm"));
+            auto p_bn1_rv = read_tensor_f32(ts.at(pfx + ".bn1.rv"));
+            auto p_bn1_wt = read_tensor_f32(ts.at(pfx + ".bn1.weight"));
+            auto p_bn1_bt = read_tensor_f32(ts.at(pfx + ".bn1.bias"));
+            auto p_bn2_rm = read_tensor_f32(ts.at(pfx + ".bn2.rm"));
+            auto p_bn2_rv = read_tensor_f32(ts.at(pfx + ".bn2.rv"));
+            auto p_bn2_wt = read_tensor_f32(ts.at(pfx + ".bn2.weight"));
+            auto p_bn2_bt = read_tensor_f32(ts.at(pfx + ".bn2.bias"));
+            auto p_se0w = read_tensor_f32(ts.at(pfx + ".se.fc.0.weight"));
+            auto p_se0b = read_tensor_f32(ts.at(pfx + ".se.fc.0.bias"));
+            auto p_se2w = read_tensor_f32(ts.at(pfx + ".se.fc.2.weight"));
+            auto p_se2b = read_tensor_f32(ts.at(pfx + ".se.fc.2.bias"));
+
+            // SE reduction ratio r = C/8
+            int r = curC / 8;
+
+            std::vector<float> ds_w, ds_rm, ds_rv, ds_wt, ds_bt;
+            if (ds) {
+                ds_w = read_tensor_f32(ts.at(pfx + ".downsample.0.weight"));
+                ds_rm = read_tensor_f32(ts.at(pfx + ".downsample.1.rm"));
+                ds_rv = read_tensor_f32(ts.at(pfx + ".downsample.1.rv"));
+                ds_wt = read_tensor_f32(ts.at(pfx + ".downsample.1.weight"));
+                ds_bt = read_tensor_f32(ts.at(pfx + ".downsample.1.bias"));
+            }
+
+            int newW = ds ? (curW - 1)/2 + 1 : curW;
+            int newH = ds ? (curH - 1)/2 + 1 : curH;
+            int newC = lf[ly];
+
+            std::vector<float> out(curW * curH * curC);
+            memcpy(out.data(), h.data(), h.size()*sizeof(float));
+
+            // conv1 -> relu -> bn1
+            std::vector<float> h1(newW*newH*newC);
+            host_conv2d_simple(out.data(), curW, curH, curC, p_c1w.data(), 3, 3, curC, newC, nullptr, h1.data(), ds?2:1, ds?2:1, 1, 1);
+            host_relu(h1.data(), newW*newH*newC);
+            host_bn2d(h1.data(), newW, newH, newC, p_bn1_rm.data(), p_bn1_rv.data(), p_bn1_wt.data(), p_bn1_bt.data());
+
+            // conv2 -> bn2
+            host_conv2d_simple(h1.data(), newW, newH, newC, p_c2w.data(), 3, 3, newC, newC, nullptr, h1.data(), 1, 1, 1, 1);
+            host_bn2d(h1.data(), newW, newH, newC, p_bn2_rm.data(), p_bn2_rv.data(), p_bn2_wt.data(), p_bn2_bt.data());
+
+            // se_blk
+            host_se_blk(h1.data(), newW, newH, newC, p_se0w.data(), p_se0b.data(), r, p_se2w.data(), p_se2b.data());
+
+            // residual
+            if (ds) {
+                // downsample: conv2d(2x2,stride2,no_bias) + bn
+                std::vector<float> res(newW*newH*newC);
+                host_conv2d_simple(out.data(), curW, curH, curC, ds_w.data(), 1, 1, curC, newC, nullptr, res.data(), 2, 2, 0, 0);
+                host_bn2d(res.data(), newW, newH, newC, ds_rm.data(), ds_rv.data(), ds_wt.data(), ds_bt.data());
+                h.resize(newW*newH*newC);
+                for (size_t i = 0; i < res.size(); i++) res[i] += h1[i];
+                memcpy(h.data(), res.data(), res.size()*sizeof(float));
+            } else {
+                h.resize(newW*newH*newC);
+                for (size_t i = 0; i < h1.size(); i++) h1[i] += out[i];
+                memcpy(h.data(), h1.data(), h1.size()*sizeof(float));
+            }
+            host_relu(h.data(), newW*newH*newC);
+
+            curW = newW; curH = newH; curC = newC;
+        }
+    }
+
+    // Now h has [W=1, H=1, C=256] -> spatial is 1x1 after 4 layers of downsampling
+    // Actually: Tm=2941, H=64 -> layer0: 2941x64x32 -> layer1(ds): 1470x32x32 -> layer2(ds): 735x16x64
+    // -> layer3(ds): 367x8x128 -> layer4(ds): 183x4x256. Not 1x1!
+    // The reference flattens to [Ws, Cs*Hs] then does ASP.
+
+    int Ws = curW, Hs = curH, Cs = curC;
+    // Flatten to [Ws, Cs*Hs]: row r = c*Hs + h
+    int CH = Cs * Hs;
+    std::vector<float> xf(Ws * CH);
+    for (int w = 0; w < Ws; w++)
+        for (int c = 0; c < Cs; c++)
+            for (int hh = 0; hh < Hs; hh++)
+                xf[w + Ws*(c*Hs + hh)] = h[w + Ws*(hh + Hs*c)];
+
+    // ASP: Conv1d(CH, 128, 1) -> relu -> BN1d -> Conv1d(128, CH, 1) -> softmax(time)
+    auto asp0w = read_tensor_f32(ts.at("hifigan_decoder.se.attention.0.weight"));
+    auto asp0b = read_tensor_f32(ts.at("hifigan_decoder.se.attention.0.bias"));
+    auto asp2_rm = read_tensor_f32(ts.at("hifigan_decoder.se.attention.2.rm"));
+    auto asp2_rv = read_tensor_f32(ts.at("hifigan_decoder.se.attention.2.rv"));
+    auto asp2_wt = read_tensor_f32(ts.at("hifigan_decoder.se.attention.2.weight"));
+    auto asp2_bt = read_tensor_f32(ts.at("hifigan_decoder.se.attention.2.bias"));
+    auto asp3w = read_tensor_f32(ts.at("hifigan_decoder.se.attention.3.weight"));
+    auto asp3b = read_tensor_f32(ts.at("hifigan_decoder.se.attention.3.bias"));
+
+    // Conv1d: a1[w][ch] = sum_in xf[w][in] * asp0w[in + in_ch*ch] + asp0b[ch]
+    // weight layout [in, out] (GGUF linear: ne[0]=in, ne[1]=out), data [out][in]
+    int in_ch = CH, out_ch = 128;
+    std::vector<float> a1(Ws * out_ch);
+    memset(a1.data(), 0, a1.size()*sizeof(float));
+    for (int w = 0; w < Ws; w++)
+        for (int ch = 0; ch < out_ch; ch++)
+            for (int in = 0; in < in_ch; in++)
+                a1[w + Ws*ch] += xf[w + Ws*in] * asp0w[in + in_ch*ch];
+    for (int ch = 0; ch < out_ch; ch++)
+        for (int w = 0; w < Ws; w++)
+            a1[w + Ws*ch] += asp0b[ch];
+    // relu
+    host_relu(a1.data(), Ws*out_ch);
+    // BN1d: per channel over time
+    for (int ch = 0; ch < out_ch; ch++) {
+        float m = asp2_rm[ch], v = asp2_rv[ch], w2 = asp2_wt[ch], b2 = asp2_bt[ch];
+        float inv = 1.0f / sqrtf(v + 1e-5f);
+        for (int w = 0; w < Ws; w++) {
+            float& v2 = a1[w + Ws*ch];
+            v2 = (v2 - m) * inv * w2 + b2;
+        }
+    }
+    // Conv1d: a2[w][ch] = sum_in a1[w][in] * asp3w[in + 128*ch] + asp3b[ch]
+    std::vector<float> a2(Ws * CH);
+    memset(a2.data(), 0, a2.size()*sizeof(float));
+    for (int w = 0; w < Ws; w++)
+        for (int ch = 0; ch < CH; ch++)
+            for (int in = 0; in < 128; in++)
+                a2[w + Ws*ch] += a1[w + Ws*in] * asp3w[in + 128*ch];
+    for (int ch = 0; ch < CH; ch++)
+        for (int w = 0; w < Ws; w++)
+            a2[w + Ws*ch] += asp3b[ch];
+    // softmax over time (per channel)
+    for (int ch = 0; ch < CH; ch++) {
+        float mx = -1e30f;
+        for (int w = 0; w < Ws; w++) mx = std::max(mx, a2[w + Ws*ch]);
+        float s = 0;
+        for (int w = 0; w < Ws; w++) { a2[w + Ws*ch] = expf(a2[w + Ws*ch] - mx); s += a2[w + Ws*ch]; }
+        for (int w = 0; w < Ws; w++) a2[w + Ws*ch] /= s;
+    }
+
+    // mu = sum_w xf[w] * a2[w], var = sum_w xf[w]^2 * a2[w] - mu^2
+    std::vector<float> mu(CH), sg(CH);
+    memset(mu.data(), 0, CH*sizeof(float));
+    for (int ch = 0; ch < CH; ch++)
+        for (int w = 0; w < Ws; w++)
+            mu[ch] += xf[w + Ws*ch] * a2[w + Ws*ch];
+    for (int ch = 0; ch < CH; ch++) {
+        float s2 = 0;
+        for (int w = 0; w < Ws; w++) s2 += xf[w + Ws*ch] * xf[w + Ws*ch] * a2[w + Ws*ch];
+        sg[ch] = sqrtf(std::max(s2 - mu[ch]*mu[ch], 1e-5f));
+    }
+
+    // asp = [mu; sg] = [4096]
+    std::vector<float> asp(2*CH);
+    memcpy(asp.data(), mu.data(), CH*sizeof(float));
+    memcpy(asp.data() + CH, sg.data(), CH*sizeof(float));
+
+    // fc: [512, 4096] x [4096] + bias -> [512]
+    auto fcw = read_tensor_f32(ts.at("hifigan_decoder.se.fc.weight"));
+    std::vector<float> emb(512);
+    memset(emb.data(), 0, 512*sizeof(float));
+    for (int o = 0; o < 512; o++)
+        for (int i = 0; i < 2*CH; i++)
+            emb[o] += asp[i] * fcw[i + (2*CH)*o];
+    auto fcb = read_tensor_f32(ts.at("hifigan_decoder.se.fc.bias"));
+    for (int o = 0; o < 512; o++) emb[o] += fcb[o];
+
+    // L2 normalize
+    float nm = 0;
+    for (int o = 0; o < 512; o++) nm += emb[o]*emb[o];
+    nm = sqrtf(nm);
+    for (int o = 0; o < 512; o++) emb[o] /= nm;
+
+    return emb;
+}
+
+
+// Speaker encoder graph
+#endif
 static ggml_tensor* se_basic(ggml_context* ctx, ggml_tensor* x,
     const std::map<std::string, ggml_tensor*>& ts, const std::string& p,
     int C, bool ds) {
@@ -185,8 +485,6 @@ static ggml_tensor* se_basic(ggml_context* ctx, ggml_tensor* x,
     // reference: out += residual; out = relu(out)
     return ggml_relu(ctx, ggml_add(ctx, h, res));
 }
-
-// Speaker encoder graph
 static ggml_cgraph* build_spk_enc(ggml_context* ctx0,
     const std::map<std::string, ggml_tensor*>& ts, int T_mel) {
     ggml_cgraph* gf = ggml_new_graph(ctx0);
@@ -648,6 +946,8 @@ std::vector<float> XttSv2Vocoder::speaker_embed(const float* ref_pcm, int n_samp
         float inv = (float)(1.0 / sqrt(var + 1e-5));
         for (int t = 0; t < Tm; t++) row[t] = (row[t] - (float)mean) * inv;
     }
+
+    // ggml graph path for speaker encoder
     size_t need = 64 * 1024 * 1024;
     if (c.compute_meta.size() < need) c.compute_meta.resize(need);
     ggml_context* ctx0 = ggml_init({need, c.compute_meta.data(), true});
@@ -657,35 +957,15 @@ std::vector<float> XttSv2Vocoder::speaker_embed(const float* ref_pcm, int n_samp
     if (!ggml_gallocr_alloc_graph(ga, gf)) { ggml_gallocr_free(ga); ggml_free(ctx0); return {}; }
     ggml_tensor* mel_in = ggml_graph_get_tensor(gf, "speaker_mel");
     ggml_backend_tensor_set(mel_in, mel.data(), 0, mel.size() * sizeof(float));
-    if (getenv("XTTS_DUMP_SPK_NET")) {
-        std::vector<float> rb(mel.size());
-        ggml_backend_tensor_get(mel_in, rb.data(), 0, mel.size() * sizeof(float));
-        double e = 0; for (size_t i = 0; i < mel.size(); i++) { double d = rb[i] - mel[i]; e += d * d; }
-        fprintf(stderr, "xtts_spk_dbg: speaker_mel readback err=%.3g (Tm=%d rms=%.4f)\n", sqrt(e), Tm,
-                sqrt(std::inner_product(mel.begin(), mel.end(), mel.begin(), 0.0) / (double)mel.size()));
-    }
     auto ts2 = std::chrono::steady_clock::now();
     if (getenv("XTTS_TIMING")) fprintf(stderr, "xtts_timing:   spk graph build+set=%.2f s\n", std::chrono::duration<double>(ts2 - ts1).count());
     auto ts3 = std::chrono::steady_clock::now();
     if (getenv("XTTS_GRAPH_PRINT")) ggml_graph_print(gf);
     if (ggml_backend_graph_compute(c.backend_cpu, gf) != GGML_STATUS_SUCCESS) {
-
         ggml_gallocr_free(ga); ggml_free(ctx0); return {};
     }
     auto ts4 = std::chrono::steady_clock::now();
     if (getenv("XTTS_TIMING")) fprintf(stderr, "xtts_timing:   spk graph compute=%.2f s\n", std::chrono::duration<double>(ts4 - ts3).count());
-    if (getenv("XTTS_DUMP_SPK_NET")) {
-        for (const char* nm : {"spk_net_conv1", "spk_net_stem", "spk_net_layer1", "spk_net_layer2", "spk_net_layer3", "spk_net_layer4"}) {
-            ggml_tensor* t2 = ggml_graph_get_tensor(gf, nm);
-            if (!t2 || !t2->buffer) continue;
-            size_t sz = ggml_nbytes(t2);
-            std::vector<float> buf(sz / 4);
-            ggml_backend_tensor_get(t2, buf.data(), 0, sz);
-            char path[512];
-            snprintf(path, sizeof(path), "%s.%s", getenv("XTTS_DUMP_SPK_NET"), nm + 8);
-            FILE* f = fopen(path, "wb"); if (f) { fwrite(buf.data(), 4, buf.size(), f); fclose(f); }
-        }
-    }
     ggml_tensor* out = ggml_graph_node(gf, ggml_graph_n_nodes(gf) - 1);
     std::vector<float> result(512);
     ggml_backend_tensor_get(out, result.data(), 0, 512 * sizeof(float));
