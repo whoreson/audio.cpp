@@ -116,6 +116,22 @@
   ],
   "packages": [
     {
+"id": "xtts_v2_gguf_q8_0",
+      "display_name": "XTTS v2 GGUF (Q8_0)",
+      "default": true,
+      "format": "gguf",
+      "precision": "q8_0",
+      "target_directory": "XTTS-v2-Q8",
+      "files": [
+        "Text to Speech (TTS)/xtts-v2-gpt-q8_0.gguf",
+        "Text to Speech (TTS)/xtts-v2-vocoder-f16.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "onicubag/xTTSv2-GGUF"
+      }
+    },
+    {
       "id": "xtts_v2_gguf",
       "display_name": "XTTS v2 GGUF (F16)",
       "default": true,
@@ -128,7 +144,23 @@
       ],
       "download": {
         "kind": "huggingface_snapshot",
-        "repo": "mirek190/audio.cpp"
+        "repo": "onicubag/xTTSv2-GGUF"
+      }
+},
+    {
+      "id": "xtts_v2_gguf_q4_k_m",
+      "display_name": "XTTS v2 GGUF (Q4_K_M)",
+      "default": false,
+      "format": "gguf",
+      "precision": "q4_k_m",
+      "target_directory": "XTTS-v2-Q4_K_M",
+      "files": [
+        "Text to Speech (TTS)/xtts-v2-gpt-q4_k_m.gguf",
+        "Text to Speech (TTS)/xtts-v2-vocoder-f16.gguf"
+      ],
+      "download": {
+        "kind": "huggingface_snapshot",
+        "repo": "onicubag/xTTSv2-GGUF"
       }
     }
   ],
