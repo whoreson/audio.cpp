@@ -13,9 +13,9 @@
 
 #include <algorithm>
 #include <chrono>
-#include <omp.h>
 #include <cmath>
 #include <cstdio>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -114,6 +114,16 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
     float repetition_penalty = parse_opt<float>(resolve_opt(request, "repetition_penalty", std::to_string(c.repetition_penalty)), c.repetition_penalty);
     int max_mel_tokens = parse_opt<int>(resolve_opt(request, "max_mel_tokens", std::to_string(c.max_mel_tokens)), c.max_mel_tokens);
 
+    // Seed: user-provided or random.
+    auto seed_it = request.options.find("seed");
+    uint32_t seed_value;
+    if (seed_it != request.options.end() && !seed_it->second.empty()) {
+        try { seed_value = static_cast<uint32_t>(std::stoul(seed_it->second)); }
+        catch (...) { seed_value = static_cast<uint32_t>(std::random_device{}()); }
+    } else {
+        seed_value = static_cast<uint32_t>(std::random_device{}());
+    }
+
     // Reference audio (voice cloning requires it)
     const runtime::AudioBuffer* ref_buf = nullptr;
     if (request.voice.has_value() && request.voice->speaker.has_value() &&
@@ -159,6 +169,7 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
     // Long-form support: split oversized text on sentence boundaries with the
     // shared framework chunker and synthesize each chunk independently.
     const std::vector<std::string> chunks = engine::text::split_text_chunks(text, 240);
+    std::mt19937 rng(seed_value);
     std::vector<float> waveform;
     for (size_t ci = 0; ci < chunks.size(); ci++) {
         const std::string chunk_norm = normalize_xtts_v2_text(chunks[ci], lang.c_str());
@@ -177,7 +188,7 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
         const auto xtts_chunk_t0 = std::chrono::steady_clock::now();
         auto mel_codes = c.gpt.generate_mel_codes(
             text_tokens, cond_latents, temperature, top_k, top_p,
-            repetition_penalty, max_mel_tokens, &decode_hiddens);
+            repetition_penalty, max_mel_tokens, rng, &decode_hiddens);
         // Debug hook: dump the generated (sampled) mel codes
         if (const char* p = getenv("XTTS_DUMP_CODES")) {
             static int codes_call = 0;
