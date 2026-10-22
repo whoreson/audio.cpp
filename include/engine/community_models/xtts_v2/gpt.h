@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -47,11 +48,12 @@ public:
     std::vector<int32_t> generate_mel_codes(
         const std::vector<int32_t> & text_tokens,
         const std::vector<float> & cond_latents,
-        float temperature = 0.75f,
-        int top_k = 50,
-        float top_p = 0.85f,
-        float repetition_penalty = 5.0f,
-        int max_mel_tokens = 1500,
+        float temperature,
+        int top_k,
+        float top_p,
+        float repetition_penalty,
+        int max_mel_tokens,
+        std::mt19937 & rng,
         std::vector<float> * decode_hiddens = nullptr);
 
     // Extract GPT hidden latents for vocoding.

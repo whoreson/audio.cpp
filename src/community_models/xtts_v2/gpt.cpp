@@ -15,13 +15,14 @@
 #endif
 #include <algorithm>
 #include <chrono>
-#include <omp.h>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
+#include <omp.h>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -779,7 +780,7 @@ static void gpt_fill_mask(GptGraph& g, int pos0) {
 // Returns generated mel codes (including the stop token if it was sampled, as before).
 static std::vector<int> gpt_gen(ggml_backend_t be, GptKV& kv, const GM& m, const XttSv2HyperParams& hp,
         const std::vector<int>& tids, const std::vector<float>& cl, float temp, int top_k, float top_p, float rep_pen,
-        int max_n, int n_threads, std::vector<float>* hiddens_out = nullptr) {
+        int max_n, int n_threads, std::mt19937& rng, std::vector<float>* hiddens_out = nullptr) {
     std::vector<int> codes;
     const int D = (int)hp.d, V = (int)hp.mel_vocab;
     const bool timing = getenv("XTTS_TIMING") != nullptr;
@@ -884,8 +885,8 @@ static std::vector<int> gpt_gen(ggml_backend_t be, GptKV& kv, const GM& m, const
             float sa2 = 0; for (auto& l2 : scaled) sa2 += l2;
             if (sa2 > 0) for (auto& l2 : scaled) l2 /= sa2;
         }
-        double r = (double)rand() / RAND_MAX; float cum = 0; int st = 0;
-        for (int j = 0; j < (int)scaled.size(); j++) { cum += scaled[j]; if (r <= cum) { st = j; break; } }
+        std::discrete_distribution<int> dist(scaled.begin(), scaled.end());
+        int st = dist(rng);
         codes.push_back(st);
         t_sample += omp_get_wtime() - ts0;
         if (getenv("XTTS_DEBUG") && (g < 20 || g % 100 == 0))
@@ -1185,12 +1186,12 @@ bool XttSv2GptEngine::compute_conditioning(const float* ref_pcm, int ref_ns_in, 
 }
 std::vector<int32_t> XttSv2GptEngine::generate_mel_codes(const std::vector<int32_t>& text_tokens, const std::vector<float>& cond_latents,
         float temperature, int top_k, float top_p, float rep_penalty, int max_tokens,
-        std::vector<float>* decode_hiddens) {
+        std::mt19937& rng, std::vector<float>* decode_hiddens) {
     if (!impl_) return {};
     auto codes = gpt_gen(impl_->backend, impl_->kv, impl_->model, impl_->hp,
         std::vector<int>(text_tokens.begin(), text_tokens.end()), cond_latents,
         temperature, top_k, top_p, rep_penalty, max_tokens,
-        impl_->backend_config.threads, decode_hiddens);
+        impl_->backend_config.threads, rng, decode_hiddens);
     return std::vector<int32_t>(codes.begin(), codes.end());
 }
 std::vector<float> XttSv2GptEngine::extract_latents(const std::vector<int32_t>& text_tokens, const std::vector<int32_t>& mel_codes,
