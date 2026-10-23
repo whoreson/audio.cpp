@@ -1,8 +1,11 @@
 #include "engine/community_models/xtts_v2/tokenizer_text.h"
 #include "engine/community_models/xtts_v2/assets.h"
+#include "engine/framework/text/utf8.h"
+#include "engine/framework/text/text_normalization.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstring>
 #include <climits>
 #include <unordered_map>
@@ -170,48 +173,7 @@ static std::string expand_symbols(const std::string& text, int lang_idx) {
     return result;
 }
 
-// ---------- UTF-8 helpers ----------
-// Decode one UTF-8 codepoint from *p, advancing *p past it.
-// *end must point past the end of the buffer. Returns 0xFFFD on truncated/invalid input.
-static uint32_t utf8_decode(const char*& p, const char* end) {
-    uint32_t cp;
-    unsigned char c = static_cast<unsigned char>(*p);
-    if (c < 0x80) {
-        cp = c; p++;
-    } else if ((c & 0xE0) == 0xC0) {
-        if (p + 1 >= end) { cp = 0xFFFD; p++; return cp; }
-        cp = ((c & 0x1F) << 6) | (static_cast<unsigned char>(p[1]) & 0x3F); p += 2;
-    } else if ((c & 0xF0) == 0xE0) {
-        if (p + 2 >= end) { cp = 0xFFFD; p++; return cp; }
-        cp = ((c & 0x0F) << 12) | ((static_cast<unsigned char>(p[1]) & 0x3F) << 6) | (static_cast<unsigned char>(p[2]) & 0x3F); p += 3;
-    } else if ((c & 0xF8) == 0xF0) {
-        if (p + 3 >= end) { cp = 0xFFFD; p++; return cp; }
-        cp = ((c & 0x07) << 18) | ((static_cast<unsigned char>(p[1]) & 0x3F) << 12) | ((static_cast<unsigned char>(p[2]) & 0x3F) << 6) | (static_cast<unsigned char>(p[3]) & 0x3F); p += 4;
-    } else {
-        cp = 0xFFFD; p++;
-    }
-    return cp;
-}
-
-// Encode one Unicode codepoint into UTF-8, appending to *out.
-static void utf8_encode(std::string& out, uint32_t cp) {
-    if (cp < 0x80) {
-        out += static_cast<char>(cp);
-    } else if (cp < 0x800) {
-        out += static_cast<char>(0xC0 | (cp >> 6));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else if (cp < 0x10000) {
-        out += static_cast<char>(0xE0 | (cp >> 12));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else {
-        out += static_cast<char>(0xF0 | (cp >> 18));
-        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    }
-}
-
+// ---------- helpers ----------
 // Latin uppercase -> lowercase for XTTS v2 supported languages.
 // Only lowercases known Latin uppercase letters; everything else passes through
 // unchanged (CJK, emoji, punctuation, etc.).
@@ -226,8 +188,8 @@ static void utf8_encode(std::string& out, uint32_t cp) {
 //   U+0178: special -> U+00FF
 //   U+0179..U+017D: odd = uppercase
 // Cyrillic: standard block U+0400..U+042F only (extended blocks not used by XTTS v2 languages)
-static uint32_t latin_tolower(uint32_t cp) {
-    if (cp < 128) return static_cast<uint32_t>(std::tolower(static_cast<unsigned char>(cp)));
+static char32_t latin_tolower(char32_t cp) {
+    if (cp < 128) return static_cast<char32_t>(std::tolower(static_cast<unsigned char>(cp)));
     if (cp >= 0x00C0 && cp <= 0x00D6) return cp + 0x20;
     if (cp >= 0x00D8 && cp <= 0x00DE) return cp + 0x20;
     if (cp >= 0x0100 && cp <= 0x012F && (cp & 1) == 0) return cp + 1;
@@ -242,44 +204,54 @@ static uint32_t latin_tolower(uint32_t cp) {
 }
 
 static std::string lowercase(const std::string& text) {
-    std::string result;
-    result.reserve(text.size());
-    const char* p = text.data();
-    const char* end = p + text.size();
-    while (p < end) {
-        utf8_encode(result, latin_tolower(utf8_decode(p, end)));
+    std::string out;
+    out.reserve(text.size());
+    const size_t n = text.size();
+    for (size_t i = 0; i < n;) {
+        unsigned char ch = static_cast<unsigned char>(text[i]);
+        size_t width = 1;
+        char32_t cp = ch;
+        if ((ch & 0xE0U) == 0xC0U) {
+            if (i + 1 >= n) { out += text[i]; i++; continue; }
+            width = 2;
+            cp = ((ch & 0x1FU) << 6) | (static_cast<unsigned char>(text[i + 1]) & 0x3FU);
+        } else if ((ch & 0xF0U) == 0xE0U) {
+            if (i + 2 >= n) { out += text[i]; i++; continue; }
+            width = 3;
+            cp = ((ch & 0x0FU) << 12) | ((static_cast<unsigned char>(text[i + 1]) & 0x3FU) << 6) | (static_cast<unsigned char>(text[i + 2]) & 0x3FU);
+        } else if ((ch & 0xF8U) == 0xF0U) {
+            if (i + 3 >= n) { out += text[i]; i++; continue; }
+            width = 4;
+            cp = ((ch & 0x07U) << 18) | ((static_cast<unsigned char>(text[i + 1]) & 0x3FU) << 12) | ((static_cast<unsigned char>(text[i + 2]) & 0x3FU) << 6) | (static_cast<unsigned char>(text[i + 3]) & 0x3FU);
+        }
+        char32_t lower = latin_tolower(cp);
+        if (lower < 0x80) {
+            out += static_cast<char>(lower);
+        } else if (lower < 0x800) {
+            out += static_cast<char>(0xC0 | (lower >> 6));
+            out += static_cast<char>(0x80 | (lower & 0x3F));
+        } else if (lower < 0x10000) {
+            out += static_cast<char>(0xE0 | (lower >> 12));
+            out += static_cast<char>(0x80 | ((lower >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (lower & 0x3F));
+        } else {
+            out += static_cast<char>(0xF0 | (lower >> 18));
+            out += static_cast<char>(0x80 | ((lower >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((lower >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (lower & 0x3F));
+        }
+        i += width;
     }
-    return result;
-}
-
-static std::string collapse_whitespace(const std::string& text) {
-    std::string result;
-    result.reserve(text.size());
-    bool last_ws = false;
-    for (char c : text) {
-        if (std::isspace(static_cast<unsigned char>(c))) {
-            if (!last_ws) { result += ' '; last_ws = true; }
-        } else { result += c; last_ws = false; }
-    }
-    while (!result.empty() && std::isspace(static_cast<unsigned char>(result.front())))
-        result.erase(result.begin());
-    while (!result.empty() && std::isspace(static_cast<unsigned char>(result.back())))
-        result.pop_back();
-    return result;
+    return out;
 }
 
 // ---------- GGUF metadata reader (minimal, no external dep) ----------
-static uint32_t gguf_kv_u32(gguf_context* gctx, const char* key, uint32_t def) {
-    int ki = gguf_find_key(gctx, key);
-    if (ki < 0) return def;
-    if (gguf_get_kv_type(gctx, ki) != GGUF_TYPE_UINT32) return def;
-    const auto* data = static_cast<const uint32_t*>(gguf_get_arr_data(gctx, ki));
-    return data[0];
-}
-
 static std::vector<std::string> gguf_kv_str_array(gguf_context* gctx, const char* key) {
     int ki = gguf_find_key(gctx, key);
     if (ki < 0) return {};
+    if (gguf_get_kv_type(gctx, ki) != GGUF_TYPE_ARRAY || gguf_get_arr_type(gctx, ki) != GGUF_TYPE_STRING) {
+        throw std::runtime_error(std::string("XTTS v2 requires a string array: ") + key);
+    }
     size_t n = gguf_get_arr_n(gctx, ki);
     std::vector<std::string> out;
     out.reserve(n);
@@ -334,21 +306,17 @@ static std::vector<int32_t> bpe_encode(const XttSv2BpeVocab* tok, const std::str
         for (auto& seg : segments) {
             if (seg.is_special) { result.push_back(seg.sid); continue; }
 
-            // linked-list symbols: split on UTF-8 character boundaries, not raw bytes
+            // linked-list symbols
             struct sym { std::string text; int next = -1; };
             std::vector<sym> symbols;
-            {
-                const char* p = seg.text.data();
-                const char* end = p + seg.text.size();
-                while (p < end) {
-                    const char* char_start = p;
-                    utf8_decode(p, end);
-                    symbols.push_back({seg.text.substr(static_cast<size_t>(char_start - seg.text.data()),
-                                                       static_cast<size_t>(p - char_start)),
-                        static_cast<int>(symbols.size() + 1)});
-                }
-                // Fix last symbol's next pointer
-                if (!symbols.empty()) symbols.back().next = -1;
+            symbols.reserve(seg.text.size());
+            engine::text::utf8_codepoint_count(seg.text, "XTTS v2 text");
+            for (size_t i = 0; i < seg.text.size();) {
+                size_t end = i + 1;
+                while (end < seg.text.size() && engine::text::is_utf8_continuation(static_cast<unsigned char>(seg.text[end]))) ++end;
+                symbols.push_back({seg.text.substr(i, end - i),
+                    end < seg.text.size() ? static_cast<int>(symbols.size() + 1) : -1});
+                i = end;
             }
 
             bool changed = true;
@@ -404,15 +372,6 @@ bool load_xtts_v2_tokenizer(XttSv2BpeVocab* tok, const std::filesystem::path& gg
             tok->merges.push_back({line.substr(0, sp), line.substr(sp + 1)});
     }
 
-    // Scores
-    { int ki = gguf_find_key(g, "tokenizer.ggml.scores");
-      if (ki >= 0 && gguf_get_kv_type(g, ki) == GGML_TYPE_F32) {
-          int n = gguf_get_arr_n(g, ki);
-          const float* sd = static_cast<const float*>(gguf_get_arr_data(g, ki));
-          tok->scores.assign(sd, sd + n);
-      }
-    }
-
     // Language tokens
     tok->lang_tokens.clear();
     for (int i = 0; i < k_n_languages; i++) {
@@ -444,6 +403,13 @@ bool load_xtts_v2_tokenizer(XttSv2BpeVocab* tok, const std::filesystem::path& gg
             [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
     }
 
+    tok->token_ids.clear();
+    tok->merge_ranks.clear();
+    for (size_t i = 0; i < tok->id_to_token.size(); ++i) tok->token_ids[tok->id_to_token[i]] = i;
+    for (size_t i = 0; i < tok->merges.size(); ++i) {
+        const auto & pair = tok->merges[i];
+        tok->merge_ranks[pair.first + char(1) + pair.second] = i;
+    }
     gguf_free(g);
     fprintf(stderr, "xtts_v2: tokenizer loaded %zu tokens, %zu merges, %zu special\n",
             tok->id_to_token.size(), tok->merges.size(), tok->special_tokens.size());
@@ -462,19 +428,7 @@ std::vector<int32_t> tokenize_xtts_v2(const XttSv2BpeVocab* tok, const std::stri
         else processed += c;
     }
 
-    // Build vocab cache
-    std::unordered_map<std::string, int32_t> vocab_cache;
-    for (int i = 0; i < (int)tok->id_to_token.size(); i++)
-        vocab_cache[tok->id_to_token[i]] = i;
-
-    // Build merge rank map
-    std::unordered_map<std::string, int> merge_rank;
-    for (int i = 0; i < (int)tok->merges.size(); i++) {
-        std::string key = tok->merges[i].first; key += (char)0x01; key += tok->merges[i].second;
-        merge_rank[key] = i;
-    }
-
-    return bpe_encode(tok, processed, vocab_cache, merge_rank);
+    return bpe_encode(tok, processed, tok->token_ids, tok->merge_ranks);
 }
 
 // ---------- number expansion (reference: num2words(lang='en')) ----------
@@ -640,7 +594,7 @@ std::string normalize_xtts_v2_text(const std::string& text, const char* language
     if (lang_idx == 0 || lang_idx == -1) result = expand_numbers_en(result);
     result = expand_abbreviations(result, lang_idx);
     result = expand_symbols(result, lang_idx);
-    result = collapse_whitespace(result);
+    result = engine::text::collapse_ascii_whitespace(result);
     return result;
 }
 
@@ -649,4 +603,3 @@ int xtts_v2_language_index(const char* language) {
 }
 
 } // namespace engine::models::xtts_v2
-
