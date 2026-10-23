@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstring>
 #include <climits>
 #include <unordered_map>
@@ -173,11 +174,75 @@ static std::string expand_symbols(const std::string& text, int lang_idx) {
 }
 
 // ---------- helpers ----------
+// Latin uppercase -> lowercase for XTTS v2 supported languages.
+// Only lowercases known Latin uppercase letters; everything else passes through
+// unchanged (CJK, emoji, punctuation, etc.).
+//
+// Verified against Python's str.lower() for U+0080..U+04FF.
+// Latin-1 Supplement: U+00C0..U+00DE have lowercase at +0x20 (gap at U+00D7).
+// Latin Extended-A: all uppercase -> lowercase is +1, with varying parity:
+//   U+0100..U+012F: even = uppercase
+//   U+0132..U+0137: even = uppercase (gap at U+0130/U+0131)
+//   U+0139..U+0148: odd = uppercase
+//   U+014A..U+0177: even = uppercase
+//   U+0178: special -> U+00FF
+//   U+0179..U+017D: odd = uppercase
+// Cyrillic: standard block U+0400..U+042F only (extended blocks not used by XTTS v2 languages)
+static char32_t latin_tolower(char32_t cp) {
+    if (cp < 128) return static_cast<char32_t>(std::tolower(static_cast<unsigned char>(cp)));
+    if (cp >= 0x00C0 && cp <= 0x00D6) return cp + 0x20;
+    if (cp >= 0x00D8 && cp <= 0x00DE) return cp + 0x20;
+    if (cp >= 0x0100 && cp <= 0x012F && (cp & 1) == 0) return cp + 1;
+    if (cp >= 0x0132 && cp <= 0x0137 && (cp & 1) == 0) return cp + 1;
+    if (cp >= 0x0139 && cp <= 0x0148 && (cp & 1) == 1) return cp + 1;
+    if (cp >= 0x014A && cp <= 0x0177 && (cp & 1) == 0) return cp + 1;
+    if (cp == 0x0178) return 0x00FF;
+    if (cp >= 0x0179 && cp <= 0x017D && (cp & 1) == 1) return cp + 1;
+    if (cp >= 0x0400 && cp <= 0x040F) return cp + 0x50;
+    if (cp >= 0x0410 && cp <= 0x042F) return cp + 0x20;
+    return cp;
+}
+
 static std::string lowercase(const std::string& text) {
-    std::string result = text;
-    std::transform(result.begin(), result.end(), result.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    return result;
+    std::string out;
+    out.reserve(text.size());
+    const size_t n = text.size();
+    for (size_t i = 0; i < n;) {
+        unsigned char ch = static_cast<unsigned char>(text[i]);
+        size_t width = 1;
+        char32_t cp = ch;
+        if ((ch & 0xE0U) == 0xC0U) {
+            if (i + 1 >= n) { out += text[i]; i++; continue; }
+            width = 2;
+            cp = ((ch & 0x1FU) << 6) | (static_cast<unsigned char>(text[i + 1]) & 0x3FU);
+        } else if ((ch & 0xF0U) == 0xE0U) {
+            if (i + 2 >= n) { out += text[i]; i++; continue; }
+            width = 3;
+            cp = ((ch & 0x0FU) << 12) | ((static_cast<unsigned char>(text[i + 1]) & 0x3FU) << 6) | (static_cast<unsigned char>(text[i + 2]) & 0x3FU);
+        } else if ((ch & 0xF8U) == 0xF0U) {
+            if (i + 3 >= n) { out += text[i]; i++; continue; }
+            width = 4;
+            cp = ((ch & 0x07U) << 18) | ((static_cast<unsigned char>(text[i + 1]) & 0x3FU) << 12) | ((static_cast<unsigned char>(text[i + 2]) & 0x3FU) << 6) | (static_cast<unsigned char>(text[i + 3]) & 0x3FU);
+        }
+        char32_t lower = latin_tolower(cp);
+        if (lower < 0x80) {
+            out += static_cast<char>(lower);
+        } else if (lower < 0x800) {
+            out += static_cast<char>(0xC0 | (lower >> 6));
+            out += static_cast<char>(0x80 | (lower & 0x3F));
+        } else if (lower < 0x10000) {
+            out += static_cast<char>(0xE0 | (lower >> 12));
+            out += static_cast<char>(0x80 | ((lower >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (lower & 0x3F));
+        } else {
+            out += static_cast<char>(0xF0 | (lower >> 18));
+            out += static_cast<char>(0x80 | ((lower >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((lower >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (lower & 0x3F));
+        }
+        i += width;
+    }
+    return out;
 }
 
 // ---------- GGUF metadata reader (minimal, no external dep) ----------
