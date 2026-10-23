@@ -170,11 +170,85 @@ static std::string expand_symbols(const std::string& text, int lang_idx) {
     return result;
 }
 
-// ---------- helpers ----------
+// ---------- UTF-8 helpers ----------
+// Decode one UTF-8 codepoint from *p, advancing *p past it.
+// *end must point past the end of the buffer. Returns 0xFFFD on truncated/invalid input.
+static uint32_t utf8_decode(const char*& p, const char* end) {
+    uint32_t cp;
+    unsigned char c = static_cast<unsigned char>(*p);
+    if (c < 0x80) {
+        cp = c; p++;
+    } else if ((c & 0xE0) == 0xC0) {
+        if (p + 1 >= end) { cp = 0xFFFD; p++; return cp; }
+        cp = ((c & 0x1F) << 6) | (static_cast<unsigned char>(p[1]) & 0x3F); p += 2;
+    } else if ((c & 0xF0) == 0xE0) {
+        if (p + 2 >= end) { cp = 0xFFFD; p++; return cp; }
+        cp = ((c & 0x0F) << 12) | ((static_cast<unsigned char>(p[1]) & 0x3F) << 6) | (static_cast<unsigned char>(p[2]) & 0x3F); p += 3;
+    } else if ((c & 0xF8) == 0xF0) {
+        if (p + 3 >= end) { cp = 0xFFFD; p++; return cp; }
+        cp = ((c & 0x07) << 18) | ((static_cast<unsigned char>(p[1]) & 0x3F) << 12) | ((static_cast<unsigned char>(p[2]) & 0x3F) << 6) | (static_cast<unsigned char>(p[3]) & 0x3F); p += 4;
+    } else {
+        cp = 0xFFFD; p++;
+    }
+    return cp;
+}
+
+// Encode one Unicode codepoint into UTF-8, appending to *out.
+static void utf8_encode(std::string& out, uint32_t cp) {
+    if (cp < 0x80) {
+        out += static_cast<char>(cp);
+    } else if (cp < 0x800) {
+        out += static_cast<char>(0xC0 | (cp >> 6));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        out += static_cast<char>(0xE0 | (cp >> 12));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else {
+        out += static_cast<char>(0xF0 | (cp >> 18));
+        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    }
+}
+
+// Latin uppercase -> lowercase for XTTS v2 supported languages.
+// Only lowercases known Latin uppercase letters; everything else passes through
+// unchanged (CJK, emoji, punctuation, etc.).
+//
+// Verified against Python's str.lower() for U+0080..U+04FF.
+// Latin-1 Supplement: U+00C0..U+00DE have lowercase at +0x20 (gap at U+00D7).
+// Latin Extended-A: all uppercase -> lowercase is +1, with varying parity:
+//   U+0100..U+012F: even = uppercase
+//   U+0132..U+0137: even = uppercase (gap at U+0130/U+0131)
+//   U+0139..U+0148: odd = uppercase
+//   U+014A..U+0177: even = uppercase
+//   U+0178: special -> U+00FF
+//   U+0179..U+017D: odd = uppercase
+// Cyrillic: standard block U+0400..U+042F only (extended blocks not used by XTTS v2 languages)
+static uint32_t latin_tolower(uint32_t cp) {
+    if (cp < 128) return static_cast<uint32_t>(std::tolower(static_cast<unsigned char>(cp)));
+    if (cp >= 0x00C0 && cp <= 0x00D6) return cp + 0x20;
+    if (cp >= 0x00D8 && cp <= 0x00DE) return cp + 0x20;
+    if (cp >= 0x0100 && cp <= 0x012F && (cp & 1) == 0) return cp + 1;
+    if (cp >= 0x0132 && cp <= 0x0137 && (cp & 1) == 0) return cp + 1;
+    if (cp >= 0x0139 && cp <= 0x0148 && (cp & 1) == 1) return cp + 1;
+    if (cp >= 0x014A && cp <= 0x0177 && (cp & 1) == 0) return cp + 1;
+    if (cp == 0x0178) return 0x00FF;
+    if (cp >= 0x0179 && cp <= 0x017D && (cp & 1) == 1) return cp + 1;
+    if (cp >= 0x0400 && cp <= 0x040F) return cp + 0x50;
+    if (cp >= 0x0410 && cp <= 0x042F) return cp + 0x20;
+    return cp;
+}
+
 static std::string lowercase(const std::string& text) {
-    std::string result = text;
-    std::transform(result.begin(), result.end(), result.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    std::string result;
+    result.reserve(text.size());
+    const char* p = text.data();
+    const char* end = p + text.size();
+    while (p < end) {
+        utf8_encode(result, latin_tolower(utf8_decode(p, end)));
+    }
     return result;
 }
 
@@ -260,13 +334,21 @@ static std::vector<int32_t> bpe_encode(const XttSv2BpeVocab* tok, const std::str
         for (auto& seg : segments) {
             if (seg.is_special) { result.push_back(seg.sid); continue; }
 
-            // linked-list symbols
+            // linked-list symbols: split on UTF-8 character boundaries, not raw bytes
             struct sym { std::string text; int next = -1; };
             std::vector<sym> symbols;
-            symbols.reserve(seg.text.size());
-            for (size_t i = 0; i < seg.text.size(); i++) {
-                symbols.push_back({std::string(1, seg.text[i]),
-                    i + 1 < seg.text.size() ? static_cast<int>(i + 1) : -1});
+            {
+                const char* p = seg.text.data();
+                const char* end = p + seg.text.size();
+                while (p < end) {
+                    const char* char_start = p;
+                    utf8_decode(p, end);
+                    symbols.push_back({seg.text.substr(static_cast<size_t>(char_start - seg.text.data()),
+                                                       static_cast<size_t>(p - char_start)),
+                        static_cast<int>(symbols.size() + 1)});
+                }
+                // Fix last symbol's next pointer
+                if (!symbols.empty()) symbols.back().next = -1;
             }
 
             bool changed = true;
