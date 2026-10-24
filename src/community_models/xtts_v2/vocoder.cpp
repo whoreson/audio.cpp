@@ -720,8 +720,14 @@ struct XttSv2Vocoder::Impl {
     ggml_backend_buffer_t buf_w = nullptr;
     std::map<std::string, ggml_tensor*> tensors;
     std::vector<uint8_t> compute_meta;
+    // Persistent gallocrs: reused across calls to avoid per-call malloc
+    // fragmentation (glibc keeps freed large arenas, causing RSS growth).
+    ggml_gallocr_t voc_galloc = nullptr;    // HiFi-GAN vocoder
+    ggml_gallocr_t spk_galloc = nullptr;    // speaker encoder
     int n_threads = 4;
     ~Impl() {
+        if (voc_galloc) ggml_gallocr_free(voc_galloc);
+        if (spk_galloc) ggml_gallocr_free(spk_galloc);
         if (ctx_w) ggml_free(ctx_w);
         if (buf_w) ggml_backend_buffer_free(buf_w);
         if (backend_cpu) ggml_backend_free(backend_cpu);
@@ -886,20 +892,23 @@ std::vector<float> XttSv2Vocoder::generate(const float* latent, int T, const flo
         if (spk_trace.size() == 512) spk_data = spk_trace.data();
         ggml_backend_tensor_set(spk_t, spk_data, 0, 512 * sizeof(float));
     }
-    ggml_gallocr_t ga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(c.backend_cpu));
-    if (!ga || !ggml_gallocr_reserve(ga, gf)) {
+    // Use persistent gallocr: reserve grows the buffer if needed, reuse otherwise.
+    // Avoids per-call malloc/free fragmentation that causes glibc RSS growth.
+    if (!c.voc_galloc) c.voc_galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(c.backend_cpu));
+    if (!c.voc_galloc || !ggml_gallocr_reserve(c.voc_galloc, gf)) {
         ggml_backend_buffer_free(vin_buf); ggml_backend_buffer_free(spk_buf);
-        if (ga) ggml_gallocr_free(ga); ggml_free(ctx0); return {}; }
-    if (!ggml_gallocr_alloc_graph(ga, gf) ||
+        if (c.voc_galloc) { ggml_gallocr_free(c.voc_galloc); c.voc_galloc = nullptr; }
+        ggml_free(ctx0); return {}; }
+    if (!ggml_gallocr_alloc_graph(c.voc_galloc, gf) ||
         ggml_backend_graph_compute(c.backend_cpu, gf) != GGML_STATUS_SUCCESS) {
         ggml_backend_buffer_free(vin_buf); ggml_backend_buffer_free(spk_buf);
-        ggml_gallocr_free(ga); ggml_free(ctx0); return {};
+        ggml_free(ctx0); return {};
     }
     ggml_tensor* out = ggml_graph_node(gf, ggml_graph_n_nodes(gf) - 1);
     int64_t Ta = out->ne[0];
     if (Ta <= 0) {
         ggml_backend_buffer_free(vin_buf); ggml_backend_buffer_free(spk_buf);
-        ggml_gallocr_free(ga); ggml_free(ctx0); return {}; }
+        ggml_free(ctx0); return {}; }
     std::vector<float> result(Ta);
     ggml_backend_tensor_get(out, result.data(), 0, Ta * sizeof(float));
     // Trace hook: dump vocoder output floats
@@ -911,7 +920,7 @@ std::vector<float> XttSv2Vocoder::generate(const float* latent, int T, const flo
     }
     ggml_backend_buffer_free(vin_buf);
     ggml_backend_buffer_free(spk_buf);
-    ggml_gallocr_free(ga); ggml_free(ctx0);
+    ggml_free(ctx0);
     voc_call++;
     return result;
 }
@@ -976,9 +985,12 @@ std::vector<float> XttSv2Vocoder::speaker_embed(const float* ref_pcm, int n_samp
     if (c.compute_meta.size() < need) c.compute_meta.resize(need);
     ggml_context* ctx0 = ggml_init({need, c.compute_meta.data(), true});
     ggml_cgraph* gf = build_spk_enc(ctx0, c.tensors, Tm);
-    ggml_gallocr_t ga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(c.backend_cpu));
-    if (!ga || !ggml_gallocr_reserve(ga, gf)) { if (ga) ggml_gallocr_free(ga); ggml_free(ctx0); return {}; }
-    if (!ggml_gallocr_alloc_graph(ga, gf)) { ggml_gallocr_free(ga); ggml_free(ctx0); return {}; }
+    // Use persistent gallocr to avoid per-call malloc fragmentation
+    if (!c.spk_galloc) c.spk_galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(c.backend_cpu));
+    if (!c.spk_galloc || !ggml_gallocr_reserve(c.spk_galloc, gf)) {
+        if (c.spk_galloc) { ggml_gallocr_free(c.spk_galloc); c.spk_galloc = nullptr; }
+        ggml_free(ctx0); return {}; }
+    if (!ggml_gallocr_alloc_graph(c.spk_galloc, gf)) { ggml_free(ctx0); return {}; }
     ggml_tensor* mel_in = ggml_graph_get_tensor(gf, "speaker_mel");
     ggml_backend_tensor_set(mel_in, mel.data(), 0, mel.size() * sizeof(float));
     auto ts2 = std::chrono::steady_clock::now();
@@ -986,14 +998,14 @@ std::vector<float> XttSv2Vocoder::speaker_embed(const float* ref_pcm, int n_samp
     auto ts3 = std::chrono::steady_clock::now();
     if (getenv("XTTS_GRAPH_PRINT")) ggml_graph_print(gf);
     if (ggml_backend_graph_compute(c.backend_cpu, gf) != GGML_STATUS_SUCCESS) {
-        ggml_gallocr_free(ga); ggml_free(ctx0); return {};
+        ggml_free(ctx0); return {};
     }
     auto ts4 = std::chrono::steady_clock::now();
     if (getenv("XTTS_TIMING")) fprintf(stderr, "xtts_timing:   spk graph compute=%.2f s\n", std::chrono::duration<double>(ts4 - ts3).count());
     ggml_tensor* out = ggml_graph_node(gf, ggml_graph_n_nodes(gf) - 1);
     std::vector<float> result(512);
     ggml_backend_tensor_get(out, result.data(), 0, 512 * sizeof(float));
-    ggml_gallocr_free(ga); ggml_free(ctx0);
+    ggml_free(ctx0);
     return result;
 }
 
