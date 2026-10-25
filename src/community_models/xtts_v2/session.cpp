@@ -85,13 +85,15 @@ void XttSv2TtsSession::prepare(const runtime::SessionPreparationRequest& request
     c.max_mel_tokens = parse_opt<int>(get_opt(request, "max_mel_tokens", "605"), 605);
     c.language = get_opt(request, "language", "en");
 
-    if (!c.gpt.load(c.assets->gpt_gguf_path, c.assets->vocoder_gguf_path, c.backend_config)) {
-        throw std::runtime_error("xtts_v2: failed to load GPT weights from " + c.assets->gpt_gguf_path.string());
+    if (!c.prepared) {
+        if (!c.gpt.load(c.assets->gpt_gguf_path, c.assets->vocoder_gguf_path, c.backend_config)) {
+            throw std::runtime_error("xtts_v2: failed to load GPT weights from " + c.assets->gpt_gguf_path.string());
+        }
+        if (!c.vocoder.load(c.assets->vocoder_gguf_path, c.backend_config)) {
+            throw std::runtime_error("xtts_v2: failed to load vocoder weights from " + c.assets->vocoder_gguf_path.string());
+        }
+        c.prepared = true;
     }
-    if (!c.vocoder.load(c.assets->vocoder_gguf_path, c.backend_config)) {
-        throw std::runtime_error("xtts_v2: failed to load vocoder weights from " + c.assets->vocoder_gguf_path.string());
-    }
-    c.prepared = true;
 }
 
 runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
