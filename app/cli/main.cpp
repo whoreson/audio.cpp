@@ -74,6 +74,7 @@ void print_task_list_help() {
         << "    --batch-audio-dir <dir>  Run one offline request per .wav file\n"
         << "    --batch-audio-role audio|voice_ref|source_audio|target_voice|prosody_ref|style_ref\n"
         << "    --batch-merge-audio none|concat\n"
+        << "    --batch-merge-silence-ms <int>  Silence in ms inserted between segments during concat (default 0)\n"
         << "    --batch-manifest-out <json>\n"
         << "    Shared CLI inputs and options are defaults for --batch-text-file, --batch-text-dir, and --batch-audio-dir\n"
         << "  Pipelines:\n"
@@ -813,6 +814,11 @@ int audiocpp_cli_main(int argc, char ** argv) {
             }
             const auto merge_mode = minitts::app::parse_audio_merge_mode(
                 find_arg(argc, argv, "--batch-merge-audio").value_or("none"));
+            const int merge_silence_ms =
+                minitts::cli::parse_int_arg(argc, argv, "--batch-merge-silence-ms", 0);
+            if (merge_silence_ms < 0) {
+                throw std::runtime_error("--batch-merge-silence-ms must be non-negative");
+            }
             if (optional_path_arg(argc, argv, "--out").has_value() &&
                 merge_mode == minitts::app::AudioMergeMode::None) {
                 throw std::runtime_error("batch --out requires --batch-merge-audio concat");
@@ -858,7 +864,8 @@ int audiocpp_cli_main(int argc, char ** argv) {
                                           (text_out->stem().string() + "_" + request_id + text_out->extension().string());
                         write_text_output(item.result, path, "text_out[" + request_id + "]");
                     }
-                });
+                },
+                merge_silence_ms);
             minitts::app::emit_batch_summary(batch_result, output_policy);
             return 0;
         }

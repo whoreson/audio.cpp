@@ -52,6 +52,7 @@ AppBatchResult run_offline_batch(
     engine::runtime::IOfflineVoiceTaskSession & offline,
     const AppBatchRequest & batch,
     AudioMergeMode audio_merge_mode,
-    const std::function<void(size_t, const AppRequestResult &)> & on_result = {});
+    const std::function<void(size_t, const AppRequestResult &)> & on_result = {},
+    int merge_silence_ms = 0);
 
 }  // namespace minitts::app
