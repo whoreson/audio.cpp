@@ -94,6 +94,15 @@
         "max": 4294967295
       },
       {
+        "name": "batch_merge_silence_ms",
+        "type": "int",
+        "description": "Silence in milliseconds inserted between synthesized text chunks during long-form generation. Set to 0 for no gap. Default 120.",
+        "required": false,
+        "default": 120,
+        "min": 0,
+        "max": 5000
+      },
+      {
         "name": "text_chunk_size",
         "type": "int",
         "description": "Maximum Unicode codepoints per framework text chunk; default 256.",

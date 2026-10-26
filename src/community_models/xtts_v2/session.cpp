@@ -91,6 +91,9 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest & request) 
 
     const auto seed = runtime::parse_u32_option(effective_options, {"seed"});
     std::mt19937 rng(seed ? *seed : runtime::random_u32_seed());
+    // Inter-chunk silence in ms for long-form text (default 120).
+    int inter_chunk_silence_ms = runtime::parse_int_option(effective_options, {"batch_merge_silence_ms", "inter_chunk_silence_ms"}).value_or(120);
+    if (inter_chunk_silence_ms < 0) inter_chunk_silence_ms = 0;
     // Reference audio (voice cloning requires it)
     const runtime::AudioBuffer* ref_buf = nullptr;
     const auto & voice = request.voice ? request.voice : c.preparation.voice;
@@ -203,7 +206,10 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest & request) 
             for (float& s : chunk_wave) s *= scale;
         }
         // Small inter-chunk pause keeps sentence boundaries natural.
-        if (ci > 0) waveform.insert(waveform.end(), (size_t)(24000 * 0.12f), 0.0f);
+        if (ci > 0 && inter_chunk_silence_ms > 0) {
+            const size_t silence_samples = (size_t)(24000 * inter_chunk_silence_ms / 1000.0);
+            waveform.insert(waveform.end(), silence_samples, 0.0f);
+        }
         waveform.insert(waveform.end(), chunk_wave.begin(), chunk_wave.end());
     }
 
