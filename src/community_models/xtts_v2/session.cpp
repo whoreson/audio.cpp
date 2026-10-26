@@ -116,6 +116,16 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
     float repetition_penalty = parse_opt<float>(resolve_opt(request, "repetition_penalty", std::to_string(c.repetition_penalty)), c.repetition_penalty);
     int max_mel_tokens = parse_opt<int>(resolve_opt(request, "max_mel_tokens", std::to_string(c.max_mel_tokens)), c.max_mel_tokens);
 
+    // Inter-chunk silence ms for long-form text (default 120).
+    int inter_chunk_silence_ms = 120;
+    {
+        const auto* v = resolve_opt(request, "batch_merge_silence_ms", "120").c_str();
+        if (v) {
+            try { inter_chunk_silence_ms = std::stoi(v); } catch (...) {}
+        }
+        if (inter_chunk_silence_ms < 0) inter_chunk_silence_ms = 0;
+    }
+
     // Seed: user-provided or random.
     auto seed_it = request.options.find("seed");
     uint32_t seed_value;
@@ -290,8 +300,11 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
             const float scale = 0.8f / max_amp;
             for (float& s : chunk_wave) s *= scale;
         }
-        // Small inter-chunk pause keeps sentence boundaries natural.
-        if (ci > 0) waveform.insert(waveform.end(), (size_t)(24000 * 0.12f), 0.0f);
+        // Inter-chunk silence (configurable via batch_merge_silence_ms).
+        if (ci > 0 && inter_chunk_silence_ms > 0) {
+            const size_t silence_samples = (size_t)(24000 * inter_chunk_silence_ms / 1000.0);
+            waveform.insert(waveform.end(), silence_samples, 0.0f);
+        }
         waveform.insert(waveform.end(), chunk_wave.begin(), chunk_wave.end());
     }
 

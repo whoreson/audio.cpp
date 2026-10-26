@@ -781,6 +781,7 @@ engine::runtime::TaskRequest ServerState::build_speech_request(const LoadedModel
     add_option_from_json(request.options, body, "max_tokens", "max_tokens");
     add_option_from_json(request.options, body, "max_steps", "max_steps");
     add_option_from_json(request.options, body, "repetition_penalty", "repetition_penalty");
+    add_option_from_json(request.options, body, "batch_merge_silence_ms", "batch_merge_silence_ms");
     add_option_from_json(request.options, body, "guidance_scale", "guidance_scale");
     add_option_from_json(request.options, body, "num_inference_steps", "num_inference_steps");
     if (const auto * value = body.find("instructions")) {
