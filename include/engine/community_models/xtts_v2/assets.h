@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <cstdint>
 #include <optional>
+#include <unordered_map>
 
 namespace engine::models::xtts_v2 {
 
@@ -64,6 +65,8 @@ struct XttSv2BpeVocab {
     std::vector<std::string> id_to_token;
     std::vector<std::pair<std::string, std::string>> merges;
     std::vector<float> scores;
+    std::unordered_map<std::string, int32_t> token_ids;
+    std::unordered_map<std::string, int> merge_ranks;
     std::vector<std::pair<std::string, int32_t>> special_tokens; // sorted by length desc
 
     int32_t stop_token = 0;
