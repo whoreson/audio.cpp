@@ -1,4 +1,7 @@
 // xtts_v2 GPT engine -- GPT-2 AR + ConditioningEncoder + Perceiver resampler
+#ifndef M_PI
+#define M_PI 3.14159265358979323846f
+#endif
 #include "engine/community_models/xtts_v2/gpt.h"
 #include "engine/framework/core/ggml_compat.h"
 #include "engine/framework/core/backend.h"
@@ -179,7 +182,7 @@ static std::vector<float> comp_mel(const float* pcm, int ns, int sr, int nfft, i
     int T2 = (int)((pd.size() - nfft) / hop) + 1; if (T2 <= 0) return {};
     std::vector<float> mel(nm * T2, 0);
     // Precompute bit-reversal permutation and twiddles for radix-2 FFT (nfft is a power of 2)
-    const int levels = __builtin_ctz((unsigned)nfft);           // log2(nfft)
+    const int levels = static_cast<int>(std::log2(static_cast<float>(nfft)));  // log2(nfft), nfft is power of 2
     std::vector<unsigned> brev(nfft);
     for (unsigned i = 0; i < (unsigned)nfft; i++) { unsigned r = 0; for (int b = 0; b < levels; b++) if (i & (1u << b)) r |= 1u << (levels - 1 - b); brev[i] = r; }
     std::vector<float> cos_t(nfft / 2), sin_t(nfft / 2);
