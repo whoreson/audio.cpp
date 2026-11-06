@@ -119,12 +119,19 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
     // Inter-chunk silence ms for long-form text (default 120).
     int inter_chunk_silence_ms = 120;
     {
-        const auto* v = resolve_opt(request, "batch_merge_silence_ms", "120").c_str();
+        const auto resolved = resolve_opt(request, "batch_merge_silence_ms", "120");
+        fprintf(stderr, "xtts_dbg: batch_merge_silence_ms resolved=\"%s\" options_size=%zu\n",
+                resolved.c_str(), request.options.size());
+        for (const auto& [k, val] : request.options) {
+            fprintf(stderr, "xtts_dbg:   option[%s]=\"%s\"\n", k.c_str(), val.c_str());
+        }
+        const auto* v = resolved.c_str();
         if (v) {
             try { inter_chunk_silence_ms = std::stoi(v); } catch (...) {}
         }
         if (inter_chunk_silence_ms < 0) inter_chunk_silence_ms = 0;
     }
+    fprintf(stderr, "xtts_dbg: inter_chunk_silence_ms=%d\n", inter_chunk_silence_ms);
 
     // Seed: user-provided or random.
     auto seed_it = request.options.find("seed");
@@ -181,6 +188,10 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
     // Long-form support: split oversized text on sentence boundaries with the
     // shared framework chunker and synthesize each chunk independently.
     const std::vector<std::string> chunks = engine::text::split_text_chunks(text, 240);
+    fprintf(stderr, "xtts_dbg: split into %zu chunks (text len=%zu)\n", chunks.size(), text.size());
+    for (size_t i = 0; i < chunks.size(); i++) {
+        fprintf(stderr, "xtts_dbg:   chunk[%zu] len=%zu: %.60s...\n", i, chunks[i].size(), chunks[i].c_str());
+    }
     std::mt19937 rng(seed_value);
     std::vector<float> waveform;
     for (size_t ci = 0; ci < chunks.size(); ci++) {
@@ -303,7 +314,12 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
         // Inter-chunk silence (configurable via batch_merge_silence_ms).
         if (ci > 0 && inter_chunk_silence_ms > 0) {
             const size_t silence_samples = (size_t)(24000 * inter_chunk_silence_ms / 1000.0);
+            fprintf(stderr, "xtts_dbg: inserting %zu silence samples (%d ms) before chunk %zu\n",
+                    silence_samples, inter_chunk_silence_ms, ci);
             waveform.insert(waveform.end(), silence_samples, 0.0f);
+        } else if (ci > 0) {
+            fprintf(stderr, "xtts_dbg: skipping silence for chunk %zu (inter_chunk_silence_ms=%d)\n",
+                    ci, inter_chunk_silence_ms);
         }
         waveform.insert(waveform.end(), chunk_wave.begin(), chunk_wave.end());
     }
