@@ -707,6 +707,13 @@ int audiocpp_cli_main(int argc, char ** argv) {
 
         const auto model_arg = find_arg(argc, argv, "--model");
         const auto pipeline_arg = find_arg(argc, argv, "--pipeline");
+        const auto recipe_arg = find_arg(argc, argv, "--recipe");
+        // Read up front for the same reason as the options above.
+        const auto workflow_inputs = collect_key_value_args(argc, argv, "--workflow-input");
+        const auto audio_converter = find_arg(argc, argv, "--audio-converter").value_or("ffmpeg");
+        const auto batch_merge_audio = find_arg(argc, argv, "--batch-merge-audio").value_or("none");
+        const int batch_merge_silence_ms = parse_int_arg(argc, argv, "--batch-merge-silence-ms", 0);
+        const auto batch_audio_role = find_arg(argc, argv, "--batch-audio-role").value_or("audio");
         if (pipeline_arg.has_value()) {
             const int threads = parse_int_arg(argc, argv, "--threads", 4);
             if (threads <= 0) {
@@ -834,7 +841,10 @@ int audiocpp_cli_main(int argc, char ** argv) {
             if (words_out.has_value()) {
                 base_request.options["return_timestamps"] = "true";
             }
-            auto batch_request = build_batch_request_from_cli(argc, argv, base_request);
+            if (batch_merge_silence_ms > 0) {
+                base_request.options["batch_merge_silence_ms"] = std::to_string(batch_merge_silence_ms);
+            }
+            auto batch_request = build_batch_request_from_cli(argc, argv, base_request, batch_audio_role);
             if (words_out.has_value()) {
                 for (auto & item : batch_request.requests) {
                     item.request.options["return_timestamps"] = "true";
