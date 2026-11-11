@@ -844,7 +844,7 @@ int audiocpp_cli_main(int argc, char ** argv) {
             if (batch_merge_silence_ms > 0) {
                 base_request.options["batch_merge_silence_ms"] = std::to_string(batch_merge_silence_ms);
             }
-            auto batch_request = build_batch_request_from_cli(argc, argv, base_request, batch_audio_role);
+            auto batch_request = build_batch_request_from_cli(argc, argv, base_request);
             if (words_out.has_value()) {
                 for (auto & item : batch_request.requests) {
                     item.request.options["return_timestamps"] = "true";

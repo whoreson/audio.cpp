@@ -14,6 +14,7 @@ enum class TextChunkMode {
     TagAware,
     Japanese,
     Endline,
+    SentenceOnly,  // split at sentence boundaries only, force-split only if single sentence exceeds budget
 };
 
 std::string_view text_chunk_mode_name(TextChunkMode mode);
