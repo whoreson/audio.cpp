@@ -14,6 +14,7 @@ enum class TextChunkMode {
     TagAware,
     Japanese,
     Endline,
+    SentenceOnly,
 };
 
 std::string_view text_chunk_mode_name(TextChunkMode mode);

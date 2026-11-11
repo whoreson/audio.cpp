@@ -207,7 +207,7 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
     //   2. Greedily packs full sentences up to the budget
     //   3. Lets oversized single sentences through whole (model can handle them)
     //   4. Uses language-specific char limits (en:250, zh:82, ja:71, etc.)
-    const std::vector<std::string> chunks = engine::text::split_text_chunks(text, 1000);
+    const std::vector<std::string> chunks = engine::text::split_text_chunks(text, 1000, engine::text::TextChunkMode::SentenceOnly);
     fprintf(stderr, "xtts_dbg: split into %zu chunks (text len=%zu)\n", chunks.size(), text.size());
     for (size_t i = 0; i < chunks.size(); i++) {
         fprintf(stderr, "xtts_dbg:   chunk[%zu] len=%zu: %.250s\n", i, chunks[i].size(), chunks[i].c_str());

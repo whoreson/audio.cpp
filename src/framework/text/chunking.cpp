@@ -579,6 +579,87 @@ std::vector<std::string> split_text_chunks_endline(
     return chunks;
 }
 
+std::vector<std::string> split_text_chunks_sentence_only(
+    std::string_view text,
+    int64_t codepoint_budget) {
+    if (codepoint_budget <= 0) {
+        throw std::runtime_error("text chunk budget must be positive");
+    }
+    const std::string trimmed = engine::io::trim_ascii_whitespace(std::string(text));
+    if (trimmed.empty()) {
+        return {};
+    }
+    const auto spans = split_utf8_spans(trimmed, "sentence-only text chunk");
+    if (static_cast<int64_t>(spans.size()) <= codepoint_budget) {
+        return {trimmed};
+    }
+
+    std::vector<size_t> sentence_ends;
+    for (size_t i = 0; i < spans.size(); ++i) {
+        if (is_sentence_break(spans[i].text)) {
+            sentence_ends.push_back(i);
+        }
+    }
+
+    std::vector<std::string> chunks;
+    size_t chunk_start = 0;
+
+    for (size_t si = 0; si < sentence_ends.size(); ++si) {
+        size_t break_span = sentence_ends[si];
+        size_t sentence_end = sentence_closers_end(spans, break_span + 1);
+        int64_t chunk_codepoints = static_cast<int64_t>(spans[sentence_end - 1].end - spans[chunk_start].start);
+
+        if (chunk_codepoints <= codepoint_budget) {
+            continue;
+        }
+
+        if (si > 0) {
+            size_t prev_end = sentence_closers_end(spans, sentence_ends[si - 1] + 1);
+            auto chunk = engine::io::trim_ascii_whitespace(
+                trimmed.substr(spans[chunk_start].start, spans[prev_end - 1].end - spans[chunk_start].start));
+            if (!chunk.empty()) {
+                chunks.push_back(std::move(chunk));
+            }
+            chunk_start = prev_end;
+
+            chunk_codepoints = static_cast<int64_t>(spans[sentence_end - 1].end - spans[chunk_start].start);
+            if (chunk_codepoints > codepoint_budget) {
+                bool split = false;
+                for (size_t sj = si; sj < sentence_ends.size(); ++sj) {
+                    size_t candidate_end = sentence_closers_end(spans, sentence_ends[sj] + 1);
+                    int64_t cp = static_cast<int64_t>(spans[candidate_end - 1].end - spans[chunk_start].start);
+                    if (cp <= codepoint_budget) {
+                        auto chunk = engine::io::trim_ascii_whitespace(
+                            trimmed.substr(spans[chunk_start].start, spans[candidate_end - 1].end - spans[chunk_start].start));
+                        if (!chunk.empty()) {
+                            chunks.push_back(std::move(chunk));
+                        }
+                        chunk_start = candidate_end;
+                        split = true;
+                        si = sj;
+                        break;
+                    }
+                }
+                if (!split) {
+                    continue;
+                }
+            }
+        } else {
+            continue;
+        }
+    }
+
+    if (chunk_start < spans.size()) {
+        auto tail = engine::io::trim_ascii_whitespace(
+            trimmed.substr(spans[chunk_start].start, spans.back().end - spans[chunk_start].start));
+        if (!tail.empty()) {
+            chunks.push_back(std::move(tail));
+        }
+    }
+
+    return chunks;
+}
+
 }  // namespace
 
 std::string_view text_chunk_mode_name(TextChunkMode mode) {
@@ -591,6 +672,8 @@ std::string_view text_chunk_mode_name(TextChunkMode mode) {
         return "japanese";
     case TextChunkMode::Endline:
         return "endline";
+    case TextChunkMode::SentenceOnly:
+        return "sentence_only";
     }
     return "unknown";
 }
@@ -613,6 +696,9 @@ std::vector<std::string> split_text_chunks(
     }
     if (mode == TextChunkMode::Endline) {
         return split_text_chunks_endline(text, codepoint_budget);
+    }
+    if (mode == TextChunkMode::SentenceOnly) {
+        return split_text_chunks_sentence_only(text, codepoint_budget);
     }
     return split_text_chunks_default(text, codepoint_budget);
 }
@@ -653,9 +739,12 @@ std::optional<TextChunkMode> parse_text_chunk_mode_override(
     if (value == "endline") {
         return TextChunkMode::Endline;
     }
+    if (value == "sentence_only" || value == "sentence-only" || value == "sentenceonly") {
+        return TextChunkMode::SentenceOnly;
+    }
     throw std::runtime_error(
         std::string(match->key) +
-        " must be one of default (or alias: word_budget), tag_aware, japanese, endline");
+        " must be one of default (or alias: word_budget), tag_aware, japanese, endline, sentence_only");
 }
 
 }  // namespace engine::text
