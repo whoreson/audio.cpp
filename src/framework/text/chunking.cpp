@@ -590,10 +590,8 @@ std::vector<std::string> split_text_chunks_sentence_only(
         return {};
     }
     const auto spans = split_utf8_spans(trimmed, "sentence-only text chunk");
-    if (static_cast<int64_t>(spans.size()) <= codepoint_budget) {
-        return {trimmed};
-    }
 
+    // Identify sentence boundaries: span indices of sentence-break punctuation.
     std::vector<size_t> sentence_ends;
     for (size_t i = 0; i < spans.size(); ++i) {
         if (is_sentence_break(spans[i].text)) {
@@ -601,57 +599,30 @@ std::vector<std::string> split_text_chunks_sentence_only(
         }
     }
 
-    std::vector<std::string> chunks;
-    size_t chunk_start = 0;
-
-    for (size_t si = 0; si < sentence_ends.size(); ++si) {
-        size_t break_span = sentence_ends[si];
-        size_t sentence_end = sentence_closers_end(spans, break_span + 1);
-        int64_t chunk_codepoints = static_cast<int64_t>(spans[sentence_end - 1].end - spans[chunk_start].start);
-
-        if (chunk_codepoints <= codepoint_budget) {
-            continue;
-        }
-
-        if (si > 0) {
-            size_t prev_end = sentence_closers_end(spans, sentence_ends[si - 1] + 1);
-            auto chunk = engine::io::trim_ascii_whitespace(
-                trimmed.substr(spans[chunk_start].start, spans[prev_end - 1].end - spans[chunk_start].start));
-            if (!chunk.empty()) {
-                chunks.push_back(std::move(chunk));
-            }
-            chunk_start = prev_end;
-
-            chunk_codepoints = static_cast<int64_t>(spans[sentence_end - 1].end - spans[chunk_start].start);
-            if (chunk_codepoints > codepoint_budget) {
-                bool split = false;
-                for (size_t sj = si; sj < sentence_ends.size(); ++sj) {
-                    size_t candidate_end = sentence_closers_end(spans, sentence_ends[sj] + 1);
-                    int64_t cp = static_cast<int64_t>(spans[candidate_end - 1].end - spans[chunk_start].start);
-                    if (cp <= codepoint_budget) {
-                        auto chunk = engine::io::trim_ascii_whitespace(
-                            trimmed.substr(spans[chunk_start].start, spans[candidate_end - 1].end - spans[chunk_start].start));
-                        if (!chunk.empty()) {
-                            chunks.push_back(std::move(chunk));
-                        }
-                        chunk_start = candidate_end;
-                        split = true;
-                        si = sj;
-                        break;
-                    }
-                }
-                if (!split) {
-                    continue;
-                }
-            }
-        } else {
-            continue;
-        }
+    // No sentence breaks found - return as-is.
+    if (sentence_ends.empty()) {
+        return {trimmed};
     }
 
-    if (chunk_start < spans.size()) {
+    // Extract individual sentences, each as its own chunk.
+    // `codepoint_budget` is used only as a hard ceiling: if a single sentence
+    // exceeds it, it is still emitted whole (the model's token limit is the
+    // real constraint, not this budget).
+    std::vector<std::string> chunks;
+    size_t prev = 0;
+    for (size_t break_span : sentence_ends) {
+        size_t sentence_end = sentence_closers_end(spans, break_span + 1);
+        auto chunk = engine::io::trim_ascii_whitespace(
+            trimmed.substr(spans[prev].start, spans[sentence_end - 1].end - spans[prev].start));
+        if (!chunk.empty()) {
+            chunks.push_back(std::move(chunk));
+        }
+        prev = sentence_end;
+    }
+    // Remaining text after last sentence break.
+    if (prev < spans.size()) {
         auto tail = engine::io::trim_ascii_whitespace(
-            trimmed.substr(spans[chunk_start].start, spans.back().end - spans[chunk_start].start));
+            trimmed.substr(spans[prev].start, spans.back().end - spans[prev].start));
         if (!tail.empty()) {
             chunks.push_back(std::move(tail));
         }
@@ -681,7 +652,7 @@ std::string_view text_chunk_mode_name(TextChunkMode mode) {
 std::vector<std::string> split_text_chunks(
     std::string_view text,
     int64_t codepoint_budget) {
-    return split_text_chunks_default(text, codepoint_budget);
+    return split_text_chunks_sentence_only(text, codepoint_budget);
 }
 
 std::vector<std::string> split_text_chunks(
