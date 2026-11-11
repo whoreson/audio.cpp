@@ -185,12 +185,32 @@ runtime::TaskResult XttSv2TtsSession::run(const runtime::TaskRequest& request) {
     const auto& cond_latents = c.ref_cache.cond;
     const auto& spk_emb = c.ref_cache.spk;
 
-    // Long-form support: split oversized text on sentence boundaries with the
-    // shared framework chunker and synthesize each chunk independently.
-    const std::vector<std::string> chunks = engine::text::split_text_chunks(text, 240);
+    // Long-form support: split oversized text and synthesize each chunk independently.
+    //
+    // The shared framework chunker (split_text_chunks_default) is budget-first: it fills
+    // to the codepoint budget and then backtracks for a sentence or clause break. This
+    // means it happily splits on commas and semicolons, which inserts a [START] token
+    // mid-sentence, destroying intonation and inserting jarring silence.
+    //
+    // The factory Python implementation (Coqui TTS) uses spaCy's sentencizer for proper
+    // NLP sentence boundary detection, then greedily packs full sentences into chunks.
+    // It never splits mid-sentence unless a single sentence exceeds the char limit, in
+    // which case textwrap.wrap is used as a last resort.
+    //
+    // Until a proper C++ sentence splitter exists (or we integrate a lightweight one),
+    // we use a high budget (1000 codepoints) so that the vast majority of sentences fit
+    // in a single chunk. The GPT model's hard limit is 402 text tokens, which is well
+    // above what 1000 codepoints produces after BPE tokenization for English.
+    //
+    // TODO: replace with a sentence-boundary-only chunker that:
+    //   1. Splits on . ! ? only (never , ; : or mid-sentence)
+    //   2. Greedily packs full sentences up to the budget
+    //   3. Lets oversized single sentences through whole (model can handle them)
+    //   4. Uses language-specific char limits (en:250, zh:82, ja:71, etc.)
+    const std::vector<std::string> chunks = engine::text::split_text_chunks(text, 1000);
     fprintf(stderr, "xtts_dbg: split into %zu chunks (text len=%zu)\n", chunks.size(), text.size());
     for (size_t i = 0; i < chunks.size(); i++) {
-        fprintf(stderr, "xtts_dbg:   chunk[%zu] len=%zu: %.60s...\n", i, chunks[i].size(), chunks[i].c_str());
+        fprintf(stderr, "xtts_dbg:   chunk[%zu] len=%zu: %.250s\n", i, chunks[i].size(), chunks[i].c_str());
     }
     std::mt19937 rng(seed_value);
     std::vector<float> waveform;

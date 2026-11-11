@@ -83,6 +83,7 @@ void print_task_list_help() {
         << "    --batch-audio-dir <dir>  Run one offline request per .wav file\n"
         << "    --batch-audio-role audio|voice_ref|source_audio|target_voice|prosody_ref|style_ref\n"
         << "    --batch-merge-audio none|concat\n"
+        << "    --batch-merge-silence-ms <int>  Silence in ms inserted between segments during concat (default 0)\n"
         << "    --batch-manifest-out <json>\n"
         << "    Shared CLI inputs and options are defaults for --batch-text-file, --batch-text-dir, and --batch-audio-dir\n"
         << "  Pipelines:\n"
@@ -779,6 +780,7 @@ int audiocpp_cli_main(int argc, char ** argv) {
         const auto workflow_inputs = collect_key_value_args(argc, argv, "--workflow-input");
         const auto audio_converter = find_arg(argc, argv, "--audio-converter").value_or("ffmpeg");
         const auto batch_merge_audio = find_arg(argc, argv, "--batch-merge-audio").value_or("none");
+        const int batch_merge_silence_ms = parse_int_arg(argc, argv, "--batch-merge-silence-ms", 0);
         const auto batch_audio_role = find_arg(argc, argv, "--batch-audio-role").value_or("audio");
         if (pipeline_arg.has_value()) {
             const int threads = parse_int_arg(argc, argv, "--threads", 4);
@@ -970,6 +972,9 @@ int audiocpp_cli_main(int argc, char ** argv) {
                     : build_request_from_cli(argc, argv);
             if (words_out.has_value()) {
                 base_request.options["return_timestamps"] = "true";
+            }
+            if (batch_merge_silence_ms > 0) {
+                base_request.options["batch_merge_silence_ms"] = std::to_string(batch_merge_silence_ms);
             }
             auto batch_request = build_batch_request_from_cli(argc, argv, base_request, batch_audio_role);
             if (words_out.has_value()) {
